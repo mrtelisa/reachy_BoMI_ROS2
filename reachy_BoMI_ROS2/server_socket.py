@@ -114,16 +114,16 @@ class ServerSocketNode(Node):
             scenarios = {
                 'familiarization': (1.0, os.path.join(current_dir, 'sh_files/familiarization.sh')),
                 'initial_test': (2.0, os.path.join(current_dir, 'sh_files/initial_test.sh')),
-                'train_1': (3.0, os.path.join(current_dir, 'sh_files/sh_files/train_1.sh')),
-                'train_2': (4.0, os.path.join(current_dir, 'sh_files/sh_files/train_2.sh')),
-                'train_3': (5.0, os.path.join(current_dir, 'sh_files/sh_files/train_3.sh')),
-                'train_4': (6.0, os.path.join(current_dir, 'sh_files/sh_files/train_4.sh')),
-                'mid_test': (7.0, os.path.join(current_dir, 'sh_files/sh_files/mid_test.sh')),
-                'train_5': (8.0, os.path.join(current_dir, 'sh_files/sh_files/train_5.sh')),
-                'train_6': (9.0, os.path.join(current_dir, 'sh_files/sh_files/train_6.sh')),
-                'train_7': (10.0, os.path.join(current_dir, 'sh_files/sh_files/train_7.sh')),
-                'train_8': (11.0, os.path.join(current_dir, 'sh_files/sh_files/train_8.sh')),
-                'final_test': (12.0, os.path.join(current_dir, 'sh_files/sh_files/final_test.sh'))
+                'train_1': (3.0, os.path.join(current_dir, 'sh_files/train_1.sh')),
+                'train_2': (4.0, os.path.join(current_dir, 'sh_files/train_2.sh')),
+                'train_3': (5.0, os.path.join(current_dir, 'sh_files/train_3.sh')),
+                'train_4': (6.0, os.path.join(current_dir, 'sh_files/train_4.sh')),
+                'mid_test': (7.0, os.path.join(current_dir, 'sh_files/mid_test.sh')),
+                'train_5': (8.0, os.path.join(current_dir, 'sh_files/train_5.sh')),
+                'train_6': (9.0, os.path.join(current_dir, 'sh_files/train_6.sh')),
+                'train_7': (10.0, os.path.join(current_dir, 'sh_files/train_7.sh')),
+                'train_8': (11.0, os.path.join(current_dir, 'sh_files/train_8.sh')),
+                'final_test': (12.0, os.path.join(current_dir, 'sh_files/final_test.sh'))
             }
 
             for key, (val, script) in scenarios.items():
