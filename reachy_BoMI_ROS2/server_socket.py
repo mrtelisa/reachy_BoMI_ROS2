@@ -12,6 +12,10 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, Point
 from std_msgs.msg import Float32, Int32
+from pathlib import Path
+
+from ament_index_python.packages import get_package_share_directory
+from reachy_BoMI_ROS2.scenarios import SCENARIO_IDS, resolve_script_for_scenario 
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -111,27 +115,18 @@ class ServerSocketNode(Node):
                 self.send_coordinates = True
 
             # Mapping scenarios (Bash scripts)
-            scenarios = {
-                'familiarization': (1.0, os.path.join(current_dir, 'sh_files/familiarization.sh')),
-                'initial_test': (2.0, os.path.join(current_dir, 'sh_files/initial_test.sh')),
-                'train_1': (3.0, os.path.join(current_dir, 'sh_files/train_1.sh')),
-                'train_2': (4.0, os.path.join(current_dir, 'sh_files/train_2.sh')),
-                'train_3': (5.0, os.path.join(current_dir, 'sh_files/train_3.sh')),
-                'train_4': (6.0, os.path.join(current_dir, 'sh_files/train_4.sh')),
-                'mid_test': (7.0, os.path.join(current_dir, 'sh_files/mid_test.sh')),
-                'train_5': (8.0, os.path.join(current_dir, 'sh_files/train_5.sh')),
-                'train_6': (9.0, os.path.join(current_dir, 'sh_files/train_6.sh')),
-                'train_7': (10.0, os.path.join(current_dir, 'sh_files/train_7.sh')),
-                'train_8': (11.0, os.path.join(current_dir, 'sh_files/train_8.sh')),
-                'final_test': (12.0, os.path.join(current_dir, 'sh_files/final_test.sh'))
-            }
+            for scenario_name, scenario_id in SCENARIO_IDS.items():
+                if scenario_name in msg:
+                    script = resolve_script_for_scenario(scenario_name)
+                    
+                    if Path(script).exists():
+                        subprocess.Popen(['/bin/bash', script])
+                    else:
+                        self.get_logger().error(f"Script not found: {script}")
 
-            for key, (val, script) in scenarios.items():
-                if key == msg:
-                    os.system(script)
-                    self.map_name = val
+                    self.map_name = scenario_id
                     self.map_name_pub.publish(Float32(data=self.map_name))
-                    self.get_logger().info(f"Starting scenario {key}")
+                    self.get_logger().info(f"Starting scenario {scenario_name}")
 
             # Check and update the state of the base
             if "nine region" in msg:
