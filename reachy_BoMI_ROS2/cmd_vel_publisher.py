@@ -6,7 +6,7 @@ from rclpy.action import ActionClient
 from geometry_msgs.msg import Twist, Point, PoseStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32
-from nav2_msgs.action import NavigateToPose
+#from nav2_msgs.action import NavigateToPose
 import math
 
 class ServerData(Node):
@@ -53,10 +53,10 @@ class ServerData(Node):
         self.y_coor_sub = self.create_subscription(Float32, 'server_socket/y_coordinate', self.y_coordinate_clbk, 10)
 
         # --- ACTION CLIENT (Nav2) ---
-        try:
+        '''try:
             self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         except ImportError:
-            self.get_logger().error("Nav2 messages not found. Navigation mode will be disabled.")
+            self.get_logger().error("Nav2 messages not found. Navigation mode will be disabled.")'''
 
         # --- TIMER LOOP (10Hz) ---
         self.timer = self.create_timer(0.1, self.control_loop)
@@ -129,7 +129,7 @@ class ServerData(Node):
             vel_msg.angular.z = self.angular_vel
             self.cmd_vel_pub.publish(vel_msg)
 
-            print("I have published Lin Vel: " + str(server_data.linear_vel) + " Angular Vel: " + str(server_data.angular_vel))
+            print("I have published Lin Vel: " + str(self.linear_vel) + " Angular Vel: " + str(self.angular_vel))
 
         # Mode 0: if odom GUI is stated
         elif self.base_state == 0.0:
@@ -139,7 +139,7 @@ class ServerData(Node):
                 self.y_coordinate_arrived = False
                 self.send_nav2_goal()
 
-    def send_nav2_goal(self):
+    '''def send_nav2_goal(self):
         # Declare the target position
         target = Point()
         target.x = self.x_coordinate + self.reachy_position.x
@@ -161,7 +161,7 @@ class ServerData(Node):
         goal_msg.pose.pose.orientation.w = 1.0
 
         self.nav_client.wait_for_server()
-        self.nav_client.send_goal_async(goal_msg)
+        self.nav_client.send_goal_async(goal_msg)'''
 
 def main(args=None):
     rclpy.init(args=args)
