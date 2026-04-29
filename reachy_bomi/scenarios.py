@@ -12,7 +12,7 @@ SCENARIO_NAMES = tuple(SCENARIO_IDS.keys())
 
 
 def get_share_dir() -> Path:
-    return Path(get_package_share_directory("reachy_BoMI_ROS2"))
+    return Path(get_package_share_directory("reachy_bomi"))
 
 
 def load_scenarios_config():

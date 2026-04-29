@@ -1,7 +1,7 @@
 from setuptools import find_packages, setup
 from glob import glob
 
-package_name = 'reachy_BoMI_ROS2'
+package_name = 'reachy_bomi'
 
 setup(
     name=package_name,
@@ -25,8 +25,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'server_socket = reachy_BoMI_ROS2.server_socket:main',
-            'cmd_vel_publisher = reachy_BoMI_ROS2.cmd_vel_publisher:main',
+            'server_socket = reachy_bomi.server_socket:main',
+            'cmd_vel_publisher = reachy_bomi.cmd_vel_publisher:main',
         ],
     },
 )

@@ -5,7 +5,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
-from reachy_BoMI_ROS2.scenarios import SCENARIO_NAMES, resolve_world_for_scenario
+from reachy_bomi.scenarios import SCENARIO_NAMES, resolve_world_for_scenario
 
 
 def launch_setup(context, *args, **kwargs):
@@ -29,13 +29,13 @@ def launch_setup(context, *args, **kwargs):
     )
 
     server_socket_node = Node(
-        package="reachy_BoMI_ROS2",
+        package="reachy_bomi",
         executable="server_socket",
         output="screen",
     )
 
     cmd_vel_publisher_node = Node(
-        package="reachy_BoMI_ROS2",
+        package="reachy_bomi",
         executable="cmd_vel_publisher",
         output="screen",
     )

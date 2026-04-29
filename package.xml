@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>reachy_BoMI_ROS2</name>
+  <name>reachy_bomi</name>
   <version>0.0.1</version>
   <description>BoMI finger input to Reachy ROS 2 velocity bridge</description>
   <maintainer email="s6504193@studenti.unige.it">Elisa Martinenghi</maintainer>
@@ -14,6 +14,7 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>reachy_bringup</exec_depend>
+  <exec_depend>reachy_utils</exec_depend>
 
 
   <depend>rclpy</depend>
