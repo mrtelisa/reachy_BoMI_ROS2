@@ -28,7 +28,16 @@ Phases 1-2 (Calibration, Cursor preview): identical to bomi_teleop.py.
 Phase 3 - Control:
     Hand movement -> PCA cursor -> 9-region velocity -> mobile base, exactly
     as in bomi_teleop.py. Hold the cursor centered (region 5) for
-    SELECTION_HOLD_SECONDS straight to stop the base and open object selection.
+    SELECTION_HOLD_SECONDS straight to move the arms into a pre-grasping pose.
+
+Phase 3.5 - Pre-grasping pose (opened from Control):
+    Both arms move to a pre-grasping posture (elbows bent to about
+    PRE_GRASP_ELBOW_PITCH_DEG degrees) the base is held at zero
+    speed. Once the arms are in place, the cursor/9-region map reappears
+    (same as Control) but sends no speed commands; ENTER resumes Control
+    with linear/angular velocities halved. Hold the cursor centered (region
+    5) for another SELECTION_HOLD_SECONDS straight to stop the base and open
+    object selection.
 
 Phase 4 - Object selection / grasp (opened from Control):
     Same capture -> hover-to-select -> Yes/No confirm flow as bomi_grasp.py,
@@ -44,6 +53,7 @@ import time
 
 import cv2
 import mediapipe as mp
+import numpy as np
 from mediapipe.tasks.python.core import base_options
 from mediapipe.tasks.python.vision import hand_landmarker
 from mediapipe.tasks.python.vision.core import vision_task_running_mode
@@ -57,8 +67,23 @@ import bomi_teleop as teleop
 DEFAULT_ROBOT_IP = "192.168.0.124"
 
 # How long the cursor must stay in region 5 (dead-zone center) before Control
-# hands off to the grasp/selection UI.
+# moves to the next step: first into the pre-grasping pose, then (once there)
+# into the grasp/selection UI.
 SELECTION_HOLD_SECONDS = 5.0
+
+# Elbow pitch (degrees) for the pre-grasping posture: same convention as the
+# SDK's built-in "elbow_90" posture (get_default_posture_joints), bent further
+# up since 90 isn't high enough to clear the object before grasping.
+PRE_GRASP_ELBOW_PITCH_DEG = -135.0
+PRE_GRASP_MOVE_DURATION = 5.0  # seconds, arm goto duration into the pre-grasping pose
+
+# Linear/angular velocity multiplier for Control once the arms are in the
+# pre-grasping pose, so driving up to the object is finer-grained.
+HALVED_SPEED_FACTOR = 0.5
+
+WAIT_WINDOW_NAME = "BoMI - Waiting"
+WAIT_CANVAS_WIDTH = 640
+WAIT_CANVAS_HEIGHT = 220
 
 COLOR_CURSOR = (255, 0, 255)  # magenta marker for the BoMI cursor, distinct from grasp's box colors
 
@@ -247,22 +272,96 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
     return crs_x, crs_y
 
 
-# --- Control, with a dwell-in-center switch into grasp mode ---
+# --- Pre-grasping pose, held between the two Control dwell phases ---
 
-def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, model, confidence) -> None:
+def _goto_pre_grasp_pose(reachy, duration: float = PRE_GRASP_MOVE_DURATION) -> list:
+    """Send both arms towards the pre-grasping posture (elbows bent to about
+    PRE_GRASP_ELBOW_PITCH_DEG degrees), non-blocking. Returns the GoToIds to
+    poll for completion, skipping any arm that isn't reported or powered on."""
+    goto_ids = []
+    for arm in (reachy.r_arm, reachy.l_arm):
+        if arm is None or not arm.is_on():
+            continue
+        joints = arm.get_default_posture_joints(common_posture="elbow_90")
+        joints[3] = PRE_GRASP_ELBOW_PITCH_DEG
+        goto_ids.append(arm.goto(joints, duration=duration, wait=False))
+    return goto_ids
+
+
+def _draw_wait_canvas(progress: float) -> np.ndarray:
+    """Dedicated canvas shown in its own window while the arms
+    move into the pre-grasping pose -- a small text overlay on the
+    already-open, busy camera feed is too easy to miss, so this pops up as
+    a separate window instead, like bomi_grasp's confirm dialog."""
+    canvas = np.full((WAIT_CANVAS_HEIGHT, WAIT_CANVAS_WIDTH, 3), 30, dtype=np.uint8)
+    cv2.putText(canvas, "Waiting that the robot",
+                (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+    cv2.putText(canvas, "has finished its movement",
+                (30, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+
+    bar_x1, bar_y1, bar_x2, bar_y2 = 30, 160, WAIT_CANVAS_WIDTH - 30, 190
+    cv2.rectangle(canvas, (bar_x1, bar_y1), (bar_x2, bar_y2), (90, 90, 90), 1)
+    filled_x = bar_x1 + int((bar_x2 - bar_x1) * progress)
+    cv2.rectangle(canvas, (bar_x1, bar_y1), (filled_x, bar_y2), (0, 255, 255), -1)
+    return canvas
+
+
+def _wait_for_pre_grasp_pose(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, reachy, mobile_base, goto_ids):
+    """Blocks until every goto in goto_ids has finished, showing a dedicated 
+    waiting window with a progress bar. The base is repeatedly held at zero 
+    speed throughout. Returns the possibly updated cursor position and whether 
+    the user quit."""
+    cam_window = teleop.CAM_WINDOW_NAME
     dt = 1.0 / teleop.PUBLISH_HZ
     last_publish = time.time()
-    cursor_filter = teleop.CursorFilter()
+    start = time.time()
+
+    while True:
+        hand_frame, crs_x, crs_y, _ = _update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
+        if hand_frame is not None:
+            cv2.imshow(cam_window, hand_frame)
+
+        progress = min((time.time() - start) / PRE_GRASP_MOVE_DURATION, 1.0)
+        cv2.imshow(WAIT_WINDOW_NAME, _draw_wait_canvas(progress))
+
+        now = time.time()
+        if now - last_publish >= dt:
+            mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
+            mobile_base.send_speed_command()
+            last_publish = now
+
+        key = cv2.waitKey(1) & 0xFF
+        if teleop._quit_requested(key, cam_window) or teleop._quit_requested(key, WAIT_WINDOW_NAME):
+            cv2.destroyWindow(WAIT_WINDOW_NAME)
+            return crs_x, crs_y, True
+
+        if all(reachy.is_goto_finished(goto_id) for goto_id in goto_ids):
+            cv2.destroyWindow(WAIT_WINDOW_NAME)
+            return crs_x, crs_y, False
+
+
+# --- Control, with a dwell-in-center switch into grasp mode ---
+
+def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, model, confidence, reachy,
+                               cursor_filter=None, crs_x=None, crs_y=None) -> None:
+    # Pass in the cursor_filter/crs_x/crs_y from the preceding cursor preview
+    # to continue them (no filter reset), avoiding a velocity blip on entry.
+    dt = 1.0 / teleop.PUBLISH_HZ
+    last_publish = time.time()
+    cursor_filter = cursor_filter or teleop.CursorFilter()
     cam_window = teleop.CAM_WINDOW_NAME
     map_window = teleop.MAP_WINDOW_NAME
 
-    crs_x, crs_y = teleop.BASE_WIDTH / 2.0, teleop.BASE_HEIGHT / 2.0
+    if crs_x is None or crs_y is None:
+        crs_x, crs_y = teleop.BASE_WIDTH / 2.0, teleop.BASE_HEIGHT / 2.0
     region = teleop.check_region_cursor(crs_x, crs_y)
     message = "lin_vel:0.000 ang_vel:0.000"
     center_hold_start = None
+    speed_scale = 1.0
+    pre_grasp_reached = False
 
     print("\n=== CONTROL ===  Q = quit  |  hold the cursor centered (region 5) "
-          f"for {SELECTION_HOLD_SECONDS:.0f}s to open object selection")
+          f"for {SELECTION_HOLD_SECONDS:.0f}s to move to the pre-grasping pose")
 
     while True:
         hand_frame, crs_x, crs_y, hand_detected = _update_bomi_cursor(
@@ -275,13 +374,15 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
             region = teleop.check_region_cursor(crs_x, crs_y)
             lin_vel, ang_vel = teleop.compute_dynamic_vel_from_cursor(crs_x, crs_y)
             lin_vel, ang_vel = teleop.apply_region_velocity_mask(region, lin_vel, ang_vel)
+            lin_vel *= speed_scale
+            ang_vel *= speed_scale
         else:
             lin_vel, ang_vel = 0.0, 0.0
 
         now = time.time()
         # Only accrue dwell time while actively tracked and centered, so a
         # dropped hand while the stale cursor happens to sit in region 5
-        # can't silently trigger the switch into grasp mode.
+        # can't silently trigger the switch into the next step.
         center_hold_start = (center_hold_start or now) if (hand_detected and region == 5) else None
         center_progress = (
             min((now - center_hold_start) / SELECTION_HOLD_SECONDS, 1.0) if center_hold_start else 0.0
@@ -292,13 +393,40 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
         cv2.putText(hand_frame, f"-> mobile base: {message}",
                     (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         if center_progress > 0:
-            cv2.putText(hand_frame, f"hold to select object: {center_progress * 100:.0f}%",
+            hold_label = "hold to select object" if pre_grasp_reached else "hold for pre-grasping pose"
+            cv2.putText(hand_frame, f"{hold_label}: {center_progress * 100:.0f}%",
                         (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_CURSOR, 2)
 
         cv2.imshow(cam_window, hand_frame)
         cv2.imshow(map_window, teleop._draw_cursor_map(crs_x, crs_y, region, message))
 
-        if center_progress >= 1.0:
+        if center_progress >= 1.0 and not pre_grasp_reached:
+            # First dwell: stop and hold here while the arms move, then resume
+            # Control at half speed — the base itself never switches modes.
+            mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
+            mobile_base.send_speed_command()
+            print("\nMoving arms to pre-grasping pose "
+                  f"(elbow pitch {PRE_GRASP_ELBOW_PITCH_DEG:.0f} deg)...")
+            goto_ids = _goto_pre_grasp_pose(reachy)
+            crs_x, crs_y, quit_now = _wait_for_pre_grasp_pose(
+                cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, reachy, mobile_base, goto_ids,
+            )
+            if quit_now:
+                break
+
+            crs_x, crs_y = teleop._cursor_preview_phase(
+                cap, landmarker, bomi_map, cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y,
+            )
+
+            pre_grasp_reached = True
+            speed_scale = HALVED_SPEED_FACTOR
+            center_hold_start = None
+            print("\nPre-grasping pose reached. Control resumed at half speed — "
+                  f"hold the cursor centered (region 5) for {SELECTION_HOLD_SECONDS:.0f}s "
+                  "to open object selection")
+            continue
+
+        if center_progress >= 1.0 and pre_grasp_reached:
             # One-way switch: once object selection opens, the base is powered
             # off for good, not just zeroed — Control never runs again after
             # this, so there's no loop iteration left that could re-drive it.
@@ -362,6 +490,10 @@ def main() -> None:
         print(f"[ERROR] No depth camera reported by the robot at '{cli_args.robot_ip}'")
         reachy.disconnect()
         sys.exit(1)
+    if reachy.r_arm is None and reachy.l_arm is None:
+        print(f"[ERROR] No arm reported by the robot at '{cli_args.robot_ip}'")
+        reachy.disconnect()
+        sys.exit(1)
 
     mobile_base = reachy.mobile_base
     depth_cam = reachy.cameras.depth
@@ -398,8 +530,10 @@ def main() -> None:
         bomi_map.fit(samples)
         print("PCA map fitted")
 
-        teleop._cursor_preview_phase(cap, landmarker, bomi_map)
-        _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, model, cli_args.conf)
+        cursor_filter = teleop.CursorFilter()
+        crs_x, crs_y = teleop._cursor_preview_phase(cap, landmarker, bomi_map, cursor_filter=cursor_filter)
+        _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, model, cli_args.conf, reachy,
+                                   cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y)
     finally:
         mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
         mobile_base.send_speed_command()
