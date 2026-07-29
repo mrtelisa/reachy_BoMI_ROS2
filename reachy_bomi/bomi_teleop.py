@@ -45,6 +45,7 @@ import argparse
 import math
 import os
 import sys
+import threading
 import time
 
 import cv2
@@ -213,6 +214,98 @@ def _quit_requested(key: int, window_name: str) -> bool:
         return False
 
 
+def start_global_quit_watcher(on_quit):
+    """Hooks ESC/Q system-wide via pynput, so quitting works with no cv2
+    window focused. Returns the listener, or None if pynput is unavailable."""
+    try:
+        from pynput import keyboard
+    except ImportError:
+        print("[WARN] pynput not installed: ESC/Q only quits with a window focused.")
+        return None
+
+    def _on_press(key) -> None:
+        if key == keyboard.Key.esc or getattr(key, "char", None) in ("q", "Q"):
+            on_quit()
+
+    try:
+        listener = keyboard.Listener(on_press=_on_press)
+        listener.daemon = True
+        listener.start()
+        return listener
+    except Exception as exc:
+        print(f"[WARN] Could not start the global ESC/Q watcher ({exc}).")
+        return None
+
+
+def start_terminal_quit_watcher(on_quit):
+    """Watches this process's own terminal for ESC/Q, for when the terminal
+    (not a cv2 window, not the global pynput hook under Wayland) is what
+    actually has keyboard focus. Returns a stop() to restore the terminal,
+    or None if stdin isn't an interactive terminal."""
+    import select
+    import termios
+    import tty
+
+    if not sys.stdin.isatty():
+        return None
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    stop_flag = threading.Event()
+
+    def _restore() -> None:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        except Exception:
+            pass
+
+    def _watch() -> None:
+        tty.setcbreak(fd)
+        try:
+            while not stop_flag.is_set():
+                ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+                if ready and sys.stdin.read(1) in ("q", "Q", "\x1b"):
+                    _restore()
+                    on_quit()
+                    return
+        finally:
+            _restore()
+
+    threading.Thread(target=_watch, daemon=True).start()
+
+    def stop() -> None:
+        stop_flag.set()
+        _restore()
+
+    return stop
+
+
+def safe_robot_shutdown(reachy: ReachySDK, mobile_base=None) -> None:
+    """Stop the base, then power down smoothly (falls back to a hard
+    turn_off). Swallows exceptions since this also runs on the emergency
+    quit path, where raising would block the process from exiting."""
+    if mobile_base is not None:
+        try:
+            mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
+            mobile_base.send_speed_command()
+        except Exception:
+            pass
+
+    try:
+        reachy.turn_off_smoothly()
+    except Exception:
+        try:
+            reachy.turn_off()
+        except Exception:
+            pass
+
+    if mobile_base is not None:
+        try:
+            mobile_base.turn_off()
+        except Exception:
+            pass
+
+
 def _draw_cursor_map(crs_x: float, crs_y: float, region: int, message: str,
                       map_width: int = 850, map_height: int = 500):
     """Rectangle representing the BASE_WIDTH x BASE_HEIGHT virtual screen, with
@@ -268,6 +361,13 @@ class CursorFilter:
         self._out_history[0] = new_output
 
         return float(new_output[0]), float(new_output[1])
+
+    def reset(self, crs_x: float, crs_y: float) -> None:
+        """Reinit history to steady-state at (crs_x, crs_y), so tracking
+        resumed after a gap doesn't overshoot on stale samples."""
+        steady = np.array([crs_x, crs_y])
+        self._in_history[:] = steady
+        self._out_history[:] = steady
 
 
 class BoMIMap:
@@ -362,17 +462,25 @@ def _calibration_phase(cap, landmarker) -> list:
     cv2.destroyWindow(window_name)
     return samples
 
-def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap) -> None:
+def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: CursorFilter = None,
+                           crs_x: float = None, crs_y: float = None, show_cam: bool = True) -> tuple:
     """
     Shows the same cursor/region view as the control phase, but never talks to
     the robot. Lets the user get a feel for the cursor and see where it starts
     out before enabling motion.
+
+    Pass an existing cursor_filter/crs_x/crs_y to continue them (no filter
+    reset) instead of starting fresh; returns the final (crs_x, crs_y).
+    show_cam=False skips the raw camera/landmarks window entirely (still
+    tracks the hand, just doesn't display it), for callers that only want
+    the cursor map on screen.
     """
-    cursor_filter = CursorFilter()
+    cursor_filter = cursor_filter or CursorFilter()
     cam_window = CAM_WINDOW_NAME
     map_window = MAP_WINDOW_NAME
 
-    crs_x, crs_y = BASE_WIDTH / 2.0, BASE_HEIGHT / 2.0
+    if crs_x is None or crs_y is None:
+        crs_x, crs_y = BASE_WIDTH / 2.0, BASE_HEIGHT / 2.0
     region = check_region_cursor(crs_x, crs_y)
 
     print("\n=== CURSOR PREVIEW (robot not moving) ===")
@@ -404,18 +512,20 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap) -> None:
             (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2,
         )
 
-        cv2.imshow(cam_window, frame)
+        if show_cam:
+            cv2.imshow(cam_window, frame)
         cv2.imshow(map_window, _draw_cursor_map(crs_x, crs_y, region, "(preview - not sent)"))
 
         key = cv2.waitKey(1) & 0xFF
         if key == 13:  # ENTER
             break
-        if _quit_requested(key, cam_window) or _quit_requested(key, map_window):
+        if (show_cam and _quit_requested(key, cam_window)) or _quit_requested(key, map_window):
             print("Aborted.")
             sys.exit(0)
 
     # Windows are intentionally left open (no destroyWindow) so the same cam/map
     # windows carry straight into the control phase instead of flickering shut.
+    return crs_x, crs_y
 
 
 def _control_phase(cap, landmarker, bomi_map: BoMIMap, mobile_base) -> None:

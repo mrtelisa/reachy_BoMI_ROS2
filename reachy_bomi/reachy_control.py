@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 BoMI teleop + grasp selection for Reachy2: merges bomi_teleop.py and
-bomi_grasp.py into a single BoMI cursor. Driving the mobile base and hovering
+bomi_detection.py into a single BoMI cursor. Driving the mobile base and hovering
 YOLO boxes/buttons in the grasp UI both use the same hand-tracked PCA cursor —
 there's no mouse involved anywhere.
 
@@ -10,10 +10,10 @@ mediapipe/opencv/ultralytics computation and the reachy2_sdk client live in
 the same process.
 
 Dependencies:
-    pip install reachy2-sdk mediapipe opencv-python scikit-learn numpy scipy ultralytics
+    pip install reachy2-sdk mediapipe opencv-python scikit-learn numpy scipy ultralytics matplotlib pynput
 
 Usage:
-    python3 bomi_selection_complete.py [robot_ip]
+    python3 reachy_control.py [robot_ip]
 
     <robot_ip> is optional; if omitted, DEFAULT_ROBOT_IP (in bomi_teleop.py) is used.
 
@@ -40,7 +40,7 @@ Phase 3.5 - Pre-grasping pose (opened from Control):
     object selection.
 
 Phase 4 - Object selection / grasp (opened from Control):
-    Same capture -> hover-to-select -> Yes/No confirm flow as bomi_grasp.py,
+    Same capture -> hover-to-select -> Yes/No confirm flow as bomi_detection.py,
     and every hover point is the BoMI cursor (mapped into that window's pixel
     space). Answering "No" or quitting (Q/ESC/X) returns to Control.
 """
@@ -60,7 +60,7 @@ from mediapipe.tasks.python.vision.core import vision_task_running_mode
 from reachy2_sdk import ReachySDK
 from ultralytics import YOLO
 
-import bomi_grasp as grasp
+import bomi_detection as grasp
 import bomi_teleop as teleop
 
 # Placeholder — replace with the robot's actual IP.
@@ -128,13 +128,13 @@ def _draw_bomi_cursor(frame, x: int, y: int) -> None:
     cv2.drawMarker(frame, (x, y), COLOR_CURSOR, markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
 
 
-# --- BoMI-cursor equivalents of bomi_grasp's mouse-driven UI ---
+# --- BoMI-cursor equivalents of bomi_detection's mouse-driven UI ---
 
 def _select_object_to_grasp_bomi(
     cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
     depth_cam, model, confidence, captured,
 ):
-    """Same hover-to-select/hover-Refresh loop as bomi_grasp._select_object_to_grasp,
+    """Same hover-to-select/hover-Refresh loop as bomi_detection._select_object_to_grasp,
     but the hover point is the BoMI cursor mapped into the captured frame."""
     base_frame, detections, labels = captured
     frame_h, frame_w = base_frame.shape[:2]
@@ -147,9 +147,7 @@ def _select_object_to_grasp_bomi(
           f"hold Refresh for {grasp.REFRESH_HOVER_SECONDS:.0f}s to recapture")
 
     while True:
-        hand_frame, crs_x, crs_y, _ = _update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
-        if hand_frame is not None:
-            cv2.imshow(teleop.CAM_WINDOW_NAME, hand_frame)
+        _, crs_x, crs_y, _ = _update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
 
         gx, gy = _map_bomi_to_frame(crs_x, crs_y, frame_w, frame_h)
         now = time.time()
@@ -186,7 +184,7 @@ def _select_object_to_grasp_bomi(
             _draw_bomi_cursor(frame, gx, gy)
             cv2.imshow(grasp.CAM_WINDOW_NAME, frame)
             cv2.waitKey(1)
-            return hovered[0], (base_frame, detections, labels), crs_x, crs_y
+            return hovered[0], box, (base_frame, detections, labels), crs_x, crs_y
 
         hover_progress = min(hover_duration / grasp.HOVER_HOLD_SECONDS, 1.0) if hovered is not None else 0.0
         for class_name, conf, box in detections:
@@ -200,20 +198,18 @@ def _select_object_to_grasp_bomi(
         cv2.imshow(grasp.CAM_WINDOW_NAME, frame)
 
         key = cv2.waitKey(1) & 0xFF
-        if grasp._quit_requested(key, grasp.CAM_WINDOW_NAME) or grasp._quit_requested(key, teleop.CAM_WINDOW_NAME):
-            return None, (base_frame, detections, labels), crs_x, crs_y
+        if grasp._quit_requested(key, grasp.CAM_WINDOW_NAME):
+            return None, None, (base_frame, detections, labels), crs_x, crs_y
 
 
 def _confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, class_name):
-    """Same Yes/No dwell dialog as bomi_grasp._confirm_grasp, hovered with the
+    """Same Yes/No dwell dialog as bomi_detection._confirm_grasp, hovered with the
     BoMI cursor mapped into the confirm canvas instead of the mouse."""
     yes_hover_start = None
     no_hover_start = None
 
     while True:
-        hand_frame, crs_x, crs_y, _ = _update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
-        if hand_frame is not None:
-            cv2.imshow(teleop.CAM_WINDOW_NAME, hand_frame)
+        _, crs_x, crs_y, _ = _update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
 
         gx, gy = _map_bomi_to_frame(crs_x, crs_y, grasp.CONFIRM_CANVAS_WIDTH, grasp.CONFIRM_CANVAS_HEIGHT)
         now = time.time()
@@ -242,16 +238,17 @@ def _confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, 
             return (None if quit_now else result), crs_x, crs_y
 
 
-def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, crs_x, crs_y):
-    """BoMI-driven equivalent of bomi_grasp._show_torso_camera: capture ->
+def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, reachy, crs_x, crs_y):
+    """BoMI-driven equivalent of bomi_detection._show_torso_camera: capture ->
     hover-select -> confirm, looping back on "No" until an object is
-    confirmed (then streams the live feed) or the user quits."""
+    confirmed (then builds its point cloud, plans/executes the grasp, and
+    streams the live feed) or the user quits."""
     captured = grasp._capture_and_detect(depth_cam, model, confidence)
     if captured is None:
         return crs_x, crs_y
 
     while True:
-        class_name, captured, crs_x, crs_y = _select_object_to_grasp_bomi(
+        class_name, box, captured, crs_x, crs_y = _select_object_to_grasp_bomi(
             cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
             depth_cam, model, confidence, captured,
         )
@@ -264,7 +261,10 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
         if decision is None:
             break
         if decision:
-            grasp._stream_torso_camera(depth_cam)
+            point_cloud = grasp._build_object_point_cloud(depth_cam, class_name, box)
+            if point_cloud is not None:
+                grasp._plan_and_execute_grasp(reachy, point_cloud, class_name)
+                grasp._stream_torso_camera(depth_cam)
             break
         # No -> back to the same captured frame/detections, all blue again
 
@@ -292,7 +292,7 @@ def _draw_wait_canvas(progress: float) -> np.ndarray:
     """Dedicated canvas shown in its own window while the arms
     move into the pre-grasping pose -- a small text overlay on the
     already-open, busy camera feed is too easy to miss, so this pops up as
-    a separate window instead, like bomi_grasp's confirm dialog."""
+    a separate window instead, like bomi_detection's confirm dialog."""
     canvas = np.full((WAIT_CANVAS_HEIGHT, WAIT_CANVAS_WIDTH, 3), 30, dtype=np.uint8)
     cv2.putText(canvas, "Waiting that the robot",
                 (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
@@ -311,15 +311,12 @@ def _wait_for_pre_grasp_pose(cap, landmarker, bomi_map, cursor_filter, crs_x, cr
     waiting window with a progress bar. The base is repeatedly held at zero 
     speed throughout. Returns the possibly updated cursor position and whether 
     the user quit."""
-    cam_window = teleop.CAM_WINDOW_NAME
     dt = 1.0 / teleop.PUBLISH_HZ
     last_publish = time.time()
     start = time.time()
 
     while True:
-        hand_frame, crs_x, crs_y, _ = _update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
-        if hand_frame is not None:
-            cv2.imshow(cam_window, hand_frame)
+        _, crs_x, crs_y, _ = _update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
 
         progress = min((time.time() - start) / PRE_GRASP_MOVE_DURATION, 1.0)
         cv2.imshow(WAIT_WINDOW_NAME, _draw_wait_canvas(progress))
@@ -331,7 +328,7 @@ def _wait_for_pre_grasp_pose(cap, landmarker, bomi_map, cursor_filter, crs_x, cr
             last_publish = now
 
         key = cv2.waitKey(1) & 0xFF
-        if teleop._quit_requested(key, cam_window) or teleop._quit_requested(key, WAIT_WINDOW_NAME):
+        if teleop._quit_requested(key, WAIT_WINDOW_NAME):
             cv2.destroyWindow(WAIT_WINDOW_NAME)
             return crs_x, crs_y, True
 
@@ -349,7 +346,6 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
     dt = 1.0 / teleop.PUBLISH_HZ
     last_publish = time.time()
     cursor_filter = cursor_filter or teleop.CursorFilter()
-    cam_window = teleop.CAM_WINDOW_NAME
     map_window = teleop.MAP_WINDOW_NAME
 
     if crs_x is None or crs_y is None:
@@ -388,16 +384,6 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
             min((now - center_hold_start) / SELECTION_HOLD_SECONDS, 1.0) if center_hold_start else 0.0
         )
 
-        cv2.putText(hand_frame, f"region={region}  cursor=({crs_x:.0f},{crs_y:.0f})",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(hand_frame, f"-> mobile base: {message}",
-                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        if center_progress > 0:
-            hold_label = "hold to select object" if pre_grasp_reached else "hold for pre-grasping pose"
-            cv2.putText(hand_frame, f"{hold_label}: {center_progress * 100:.0f}%",
-                        (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_CURSOR, 2)
-
-        cv2.imshow(cam_window, hand_frame)
         cv2.imshow(map_window, teleop._draw_cursor_map(crs_x, crs_y, region, message))
 
         if center_progress >= 1.0 and not pre_grasp_reached:
@@ -413,9 +399,10 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
             )
             if quit_now:
                 break
+            cursor_filter.reset(crs_x, crs_y)
 
             crs_x, crs_y = teleop._cursor_preview_phase(
-                cap, landmarker, bomi_map, cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y,
+                cap, landmarker, bomi_map, cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y, show_cam=False,
             )
 
             pre_grasp_reached = True
@@ -434,8 +421,9 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
             mobile_base.send_speed_command()
             mobile_base.turn_off()
             print("\nMobile base powered off. Switching to object selection for good.")
+            cv2.destroyWindow(map_window)
             _run_grasp_mode(
-                cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, crs_x, crs_y,
+                cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, reachy, crs_x, crs_y,
             )
             break
 
@@ -447,13 +435,12 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
             last_publish = now
 
         key = cv2.waitKey(1) & 0xFF
-        if teleop._quit_requested(key, cam_window) or teleop._quit_requested(key, map_window):
+        if teleop._quit_requested(key, map_window):
             break
 
     mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
     mobile_base.send_speed_command()
     mobile_base.turn_off()
-    cv2.destroyWindow(cam_window)
     cv2.destroyWindow(map_window)
 
 
@@ -499,10 +486,23 @@ def main() -> None:
     depth_cam = reachy.cameras.depth
 
     reachy.turn_on()
+    reachy.goto_posture("default", duration=3.0, wait=True)
     mobile_base.lidar.safety_enabled = True
     mobile_base.lidar.safety_slowdown_distance = teleop.LIDAR_SLOWDOWN_DISTANCE
     mobile_base.lidar.safety_critical_distance = teleop.LIDAR_CRITICAL_DISTANCE
     mobile_base.turn_on()
+
+    def _emergency_shutdown() -> None:
+        print("\n[QUIT] ESC/Q pressed — stopping the robot and exiting.")
+        try:
+            teleop.safe_robot_shutdown(reachy, mobile_base)
+            reachy.disconnect()
+            cv2.destroyAllWindows()
+        finally:
+            os._exit(0)
+
+    teleop.start_global_quit_watcher(_emergency_shutdown)
+    stop_terminal_watcher = teleop.start_terminal_quit_watcher(_emergency_shutdown)
 
     print(f"Loading YOLO model '{cli_args.yolo_model}'...")
     model = YOLO(cli_args.yolo_model)
@@ -510,10 +510,11 @@ def main() -> None:
     cap = None
     landmarker = None
     try:
-        cap = cv2.VideoCapture(cli_args.cam)
+        cap = cv2.VideoCapture(cli_args.cam, cv2.CAP_V4L2)
         if not cap.isOpened():
             print(f"[ERROR] Cannot open camera {cli_args.cam}")
             sys.exit(1)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # always the freshest frame, not a growing backlog
 
         landmarker_options = hand_landmarker.HandLandmarkerOptions(
             base_options=base_options.BaseOptions(model_asset_path=cli_args.model),
@@ -531,12 +532,15 @@ def main() -> None:
         print("PCA map fitted")
 
         cursor_filter = teleop.CursorFilter()
-        crs_x, crs_y = teleop._cursor_preview_phase(cap, landmarker, bomi_map, cursor_filter=cursor_filter)
+        crs_x, crs_y = teleop._cursor_preview_phase(
+            cap, landmarker, bomi_map, cursor_filter=cursor_filter, show_cam=False,
+        )
         _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, model, cli_args.conf, reachy,
                                    cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y)
     finally:
-        mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
-        mobile_base.send_speed_command()
+        if stop_terminal_watcher is not None:
+            stop_terminal_watcher()
+        teleop.safe_robot_shutdown(reachy, mobile_base)
         if cap is not None:
             cap.release()
         cv2.destroyAllWindows()

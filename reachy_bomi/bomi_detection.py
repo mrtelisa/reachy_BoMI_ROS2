@@ -6,10 +6,10 @@ torso camera at launch, runs YOLOv8 on it to spot graspable objects, and
 position in Reachy's coordinate system, over reachy2_sdk (gRPC/IP).
 
 Dependencies:
-    pip install reachy2-sdk opencv-python numpy ultralytics
+    pip install reachy2-sdk opencv-python numpy ultralytics matplotlib
 
 Usage:
-    python3 bomi_grasp.py [robot_ip]
+    python3 bomi_detection.py [robot_ip]
 
     <robot_ip> is optional; if omitted, DEFAULT_ROBOT_IP (set in this file) is used.
 
@@ -32,13 +32,16 @@ import time
 from typing import List, Optional, Tuple
 
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 from reachy2_sdk import ReachySDK
 from reachy2_sdk.media.camera import CameraView, DepthCamera
 from ultralytics import YOLO
 
+import reachy_grasp
+
 # Placeholder — replace with the robot's actual IP.
-DEFAULT_ROBOT_IP = "192.168.0.120"
+DEFAULT_ROBOT_IP = "192.168.0.124"
 
 CAM_WINDOW_NAME = "BoMI - Depth Camera (RGB)"
 
@@ -63,6 +66,12 @@ COLOR_GREEN = (0, 255, 0)
 
 HOVER_HOLD_SECONDS = 5.0
 HOVER_IOU_MATCH = 0.3  # min overlap between frames to count as "still hovering the same object"
+
+# Depth frames fused (per-pixel median) before building the point cloud, so
+# flickering specular-reflection dropouts in any single frame get filled in
+# by frames where that pixel did register. Camera and object are assumed
+# static during this.
+DEPTH_ACCUMULATION_FRAMES = 10
 
 REFRESH_BUTTON_BOX: Box = (10, 10, 260, 90)
 COLOR_BUTTON = (0, 0, 255)
@@ -303,11 +312,11 @@ def _capture_and_detect(depth_cam: DepthCamera, model: YOLO, confidence: float) 
 
 def _select_object_to_grasp(
     depth_cam: DepthCamera, model: YOLO, confidence: float, captured: Capture,
-) -> Tuple[Optional[str], Capture]:
-    """Detect-and-hover loop on an already-captured frame. Returns the class name once a box
-    is held green for HOVER_HOLD_SECONDS (or None if the user quit), plus the possibly-refreshed
-    (frame, detections, labels), so a later re-entry (e.g. after answering "No") can reuse them
-    without recapturing."""
+) -> Tuple[Optional[str], Optional[Box], Capture]:
+    """Detect-and-hover loop on an already-captured frame. Returns the class name and its box
+    once held green for HOVER_HOLD_SECONDS (or None, None if the user quit), plus the
+    possibly-refreshed (frame, detections, labels), so a later re-entry (e.g. after answering
+    "No") can reuse them without recapturing."""
     base_frame, detections, labels = captured
 
     mouse = _MouseTracker(CAM_WINDOW_NAME)
@@ -351,7 +360,7 @@ def _select_object_to_grasp(
             _draw_box(frame, box, labels[box], COLOR_GREEN)
             cv2.imshow(CAM_WINDOW_NAME, frame)
             cv2.waitKey(1)
-            return hovered[0], (base_frame, detections, labels)
+            return hovered[0], box, (base_frame, detections, labels)
 
         hover_progress = min(hover_duration / HOVER_HOLD_SECONDS, 1.0) if hovered is not None else 0.0
         for class_name, conf, box in detections:
@@ -365,7 +374,184 @@ def _select_object_to_grasp(
 
         key = cv2.waitKey(1) & 0xFF
         if _quit_requested(key, CAM_WINDOW_NAME):
-            return None, (base_frame, detections, labels)
+            return None, None, (base_frame, detections, labels)
+
+
+# --- Point cloud pipeline (first step towards an actual grasp pose) ---
+#
+# Once an object is confirmed, everything outside its bbox is irrelevant to
+# its own shape, so the crop below throws it away. A small pixel
+# margin is added around the YOLO box so a tight detection doesn't clip part
+# of the object out of the cloud.
+BBOX_PADDING_PX = 10
+
+
+def _pad_box(box: Box, padding: int, frame_shape: Tuple[int, int]) -> Box:
+    """Grow box by padding pixels on every side, clamped to the frame."""
+    height, width = frame_shape
+    x1, y1, x2, y2 = box
+    return (
+        max(0, x1 - padding), max(0, y1 - padding),
+        min(width, x2 + padding), min(height, y2 + padding),
+    )
+
+
+def _crop_depth_to_box(depth_frame: np.ndarray, box: Box) -> np.ndarray:
+    x1, y1, x2, y2 = box
+    return depth_frame[y1:y2, x1:x2]
+
+
+def _fuse_depth_frames(depth_stack: List[np.ndarray]) -> np.ndarray:
+    """Per-pixel median over valid (>0) readings across depth_stack, so a
+    pixel dropped by specular reflection in some frames is filled in by the
+    frames where it did register. Pixels invalid in every frame stay 0."""
+    stacked = np.stack(depth_stack).astype(np.float32)
+    stacked[stacked <= 0] = np.nan
+    with np.errstate(all="ignore"):
+        fused = np.nanmedian(stacked, axis=0)
+    return np.nan_to_num(fused, nan=0.0).astype(depth_stack[0].dtype)
+
+
+FOREGROUND_DEPTH_TOLERANCE_MM = 50.0
+
+
+def _isolate_foreground(depth_crop: np.ndarray, tolerance_mm: float = FOREGROUND_DEPTH_TOLERANCE_MM) -> np.ndarray:
+    """Keep only depth pixels within tolerance_mm of the crop's median valid
+    depth. A YOLO box is rectangular but the object usually isn't (e.g. a
+    bottle), so its corners/margins often show background beyond the
+    object; left unfiltered, those pixels get counted into width/height.
+    Assumes the object is the majority of valid pixels in the box."""
+    valid = depth_crop > 0
+    if not np.any(valid):
+        return depth_crop
+    median_depth = np.median(depth_crop[valid])
+    keep = valid & (np.abs(depth_crop.astype(np.float64) - median_depth) <= tolerance_mm)
+    result = np.zeros_like(depth_crop)
+    result[keep] = depth_crop[keep]
+    return result
+
+
+def _depth_crop_to_point_cloud(depth_cam: DepthCamera, depth_crop: np.ndarray, box: Box) -> np.ndarray:
+    """3D points (Reachy coords, meters) for every valid pixel in depth_crop.
+    Replicates pixel_to_world()'s math locally over all pixels at once
+    instead of calling it per pixel (each call is 2 gRPC round trips)."""
+    x1, y1, _, _ = box
+    rows, cols = np.nonzero(depth_crop > 0)
+    if rows.size == 0:
+        return np.empty((0, 3))
+
+    params = depth_cam.get_parameters(view=CameraView.LEFT)
+    extrinsics = depth_cam.get_extrinsics(view=CameraView.LEFT)
+    if params is None or extrinsics is None:
+        return np.empty((0, 3))
+    _, _, _, _, K, _, _ = params
+
+    u = (x1 + cols).astype(np.float64)
+    v = (y1 + rows).astype(np.float64)
+    z_c = depth_crop[rows, cols].astype(np.float64) / 1000.0
+
+    uv_homogeneous = np.stack([u, v, np.ones_like(u)], axis=1)
+    camera_coords = uv_homogeneous @ np.linalg.inv(K).T
+    camera_coords_homogeneous = np.stack(
+        [camera_coords[:, 0] * z_c, camera_coords[:, 1] * z_c, z_c, np.ones_like(z_c)], axis=1,
+    )
+    world_coords = camera_coords_homogeneous @ np.linalg.inv(extrinsics).T
+    return world_coords[:, :3]
+
+
+def _show_point_cloud(point_cloud: np.ndarray, class_name: str) -> None:
+    """Blocking 3D scatter view of the fused point cloud (Reachy coordinates,
+    meters), colored by height, so a bad depth crop is caught here before any
+    further pipeline step. Closing the window resumes the pipeline."""
+    if point_cloud.shape[0] == 0:
+        print("[WARN] Point cloud is empty, nothing to show")
+        return
+
+    fig = plt.figure(f"Point cloud - {class_name}")
+    ax = fig.add_subplot(projection="3d")
+    xs, ys, zs = point_cloud[:, 0], point_cloud[:, 1], point_cloud[:, 2]
+    scatter = ax.scatter(xs, ys, zs, c=zs, cmap="viridis", s=4)
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("y (m)")
+    ax.set_zlabel("z (m)")
+    ax.set_title(f"{class_name}: {len(point_cloud)} points")
+    fig.colorbar(scatter, ax=ax, shrink=0.6, label="z (m)")
+
+    # Equal aspect ratio on all three axes, so the object's proportions
+    # aren't visually distorted by whichever axis happens to span more.
+    ranges = point_cloud.max(axis=0) - point_cloud.min(axis=0)
+    half_range = max(ranges.max() / 2.0, 1e-3)
+    mid = point_cloud.mean(axis=0)
+    ax.set_xlim(mid[0] - half_range, mid[0] + half_range)
+    ax.set_ylim(mid[1] - half_range, mid[1] + half_range)
+    ax.set_zlim(mid[2] - half_range, mid[2] + half_range)
+
+    print("Close the point cloud window to continue...")
+    plt.show()
+
+
+def _build_object_point_cloud(
+    depth_cam: DepthCamera, class_name: str, box: Box, num_frames: int = DEPTH_ACCUMULATION_FRAMES,
+    show: bool = True,
+) -> Optional[np.ndarray]:
+    """First pipeline step once an object is confirmed: crop to its (padded)
+    bbox and fuse num_frames depth readings (median per pixel) before
+    building the 3D point cloud. Camera and object are assumed static
+    during this.
+    Returns the point cloud (Nx3, meters) or None if the user quit."""
+    print(f"\n=== Building point cloud for '{class_name}' "
+          f"({num_frames} depth frames) ===  Q = quit")
+
+    padded_box = None
+    depth_stack: List[np.ndarray] = []
+    while len(depth_stack) < num_frames:
+        rgb_result = depth_cam.get_frame(view=CameraView.LEFT)
+        if rgb_result is not None:
+            frame, _timestamp = rgb_result
+            if padded_box is None:
+                padded_box = _pad_box(box, BBOX_PADDING_PX, frame.shape[:2])
+            _draw_box(frame, padded_box, class_name, COLOR_GREEN)
+            cv2.putText(frame, f"Fusing depth frame {len(depth_stack) + 1}/{num_frames}...",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_GREEN, 2)
+            cv2.imshow(CAM_WINDOW_NAME, frame)
+
+        depth_result = depth_cam.get_depth_frame(view=CameraView.DEPTH)
+        if depth_result is not None and padded_box is not None:
+            depth_frame, _timestamp = depth_result
+            depth_stack.append(_crop_depth_to_box(depth_frame, padded_box))
+
+        key = cv2.waitKey(1) & 0xFF
+        if _quit_requested(key, CAM_WINDOW_NAME):
+            return None
+
+    fused_crop = _fuse_depth_frames(depth_stack)
+    valid_before = 100.0 * np.mean(depth_stack[-1] > 0)
+    valid_after = 100.0 * np.mean(fused_crop > 0)
+    print(f"Valid depth pixels: {valid_before:.0f}% (single frame) -> "
+          f"{valid_after:.0f}% (after {num_frames}-frame fusion)")
+
+    foreground_crop = _isolate_foreground(fused_crop)
+    point_cloud = _depth_crop_to_point_cloud(depth_cam, foreground_crop, padded_box)
+    print(f"Point cloud: {len(point_cloud)} points (foreground-filtered)")
+    if show:
+        _show_point_cloud(point_cloud, class_name)
+    return point_cloud
+
+
+def _plan_and_execute_grasp(reachy: ReachySDK, point_cloud: np.ndarray, class_name: str) -> None:
+    """Bridges the point cloud into reachy_grasp's shape-prior planner and
+    runs the grasp. ObjectTooWideError/GraspNotReachableError are expected,
+    recoverable outcomes (not bugs), so they're reported and swallowed."""
+    try:
+        p_front, width_m, height_m, shape = reachy_grasp.point_cloud_to_grasp_input(point_cloud, class_name)
+        arm = reachy_grasp.pick_arm(reachy, p_front)
+        plan = reachy_grasp.plan_grasp(arm, p_front, width_m, height_m, shape)
+    except reachy_grasp.ObjectTooWideError as e:
+        print(f"[User] {e}")
+    except reachy_grasp.GraspNotReachableError as e:
+        print(f"[Error] {e}")
+    else:
+        reachy_grasp.execute_grasp(arm, plan)
 
 
 def _show_torso_camera(reachy: ReachySDK, model: YOLO, confidence: float) -> None:
@@ -379,7 +565,7 @@ def _show_torso_camera(reachy: ReachySDK, model: YOLO, confidence: float) -> Non
         return
 
     while True:
-        class_name, captured = _select_object_to_grasp(depth_cam, model, confidence, captured)
+        class_name, box, captured = _select_object_to_grasp(depth_cam, model, confidence, captured)
         if class_name is None:
             break
 
@@ -387,7 +573,10 @@ def _show_torso_camera(reachy: ReachySDK, model: YOLO, confidence: float) -> Non
         if decision is None:
             break
         if decision:
-            _stream_torso_camera(depth_cam)
+            point_cloud = _build_object_point_cloud(depth_cam, class_name, box)
+            if point_cloud is not None:
+                _plan_and_execute_grasp(reachy, point_cloud, class_name)
+                _stream_torso_camera(depth_cam)
             break
         # No -> back to the same captured frame/detections, all blue again
 
