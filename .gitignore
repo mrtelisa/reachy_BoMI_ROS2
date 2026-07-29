@@ -6,3 +6,6 @@ install/
 log/
 *.npz
 File_BoMI_Naji/
+README.md
+reachy_bomi/tests/depth_camera.py
+reachy_bomi/tests/elbow_135.py
