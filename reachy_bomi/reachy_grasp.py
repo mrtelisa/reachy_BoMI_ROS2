@@ -185,11 +185,12 @@ def pick_arm(reachy, p_front):
     return reachy.l_arm if p_front[1] > 0 else reachy.r_arm
 
 
-# --- Bridge: raw point cloud -> (p_front, width_m, height_m, shape) --------
+# --- Bridge: raw point cloud -> (p_front, shape) ---------------------------
 #
 # A single depth view only ever sees the object's front shell, so shape
 # can't be inferred from the cloud itself: it's a prior from the YOLO class.
-# width/height instead come straight from the cloud's bounding extent.
+# width_m/height_m are NOT derived here -- see _object_dimensions in
+# bomi_detection.py (PCA on the point cloud's own principal axes).
 # Flat/rectangular items map to "box"; blocky/roughly-cubic ones to "cube"
 # (geometrically identical here, kept distinct only for readability).
 SHAPE_BY_CLASS = {
@@ -213,17 +214,16 @@ def shape_from_class(class_name):
 
 def point_cloud_to_grasp_input(point_cloud, class_name):
     """Reduce a raw point cloud (Nx3, robot frame, meters) to the
-    (p_front, width_m, height_m, shape) plan_grasp needs. p_front is the
-    cloud's centroid; width/height are its Y/Z bounding extent."""
+    (p_front, shape) plan_grasp needs, besides width_m/height_m -- those
+    come from _object_dimensions (bomi_detection.py) instead, which derives
+    them from this same point cloud's principal-axis extents (see that
+    function's docstring for why the third, smallest axis is dropped).
+    p_front is the cloud's centroid."""
     if point_cloud.shape[0] == 0:
         raise ValueError("Empty point cloud: nothing to grasp")
 
     p_front = point_cloud.mean(axis=0)
-    mins = point_cloud.min(axis=0)
-    maxs = point_cloud.max(axis=0)
-    width_m = float(maxs[1] - mins[1])
-    height_m = float(maxs[2] - mins[2])
-    return p_front, width_m, height_m, shape_from_class(class_name)
+    return p_front, shape_from_class(class_name)
 
 
 # --- Example of hooking into your pipeline ---------------------------------

@@ -64,7 +64,7 @@ import bomi_detection as grasp
 import bomi_teleop as teleop
 
 # Placeholder — replace with the robot's actual IP.
-DEFAULT_ROBOT_IP = "192.168.0.124"
+DEFAULT_ROBOT_IP = "192.168.0.104"
 
 # How long the cursor must stay in region 5 (dead-zone center) before Control
 # moves to the next step: first into the pre-grasping pose, then (once there)
@@ -261,9 +261,10 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
         if decision is None:
             break
         if decision:
-            point_cloud = grasp._build_object_point_cloud(depth_cam, class_name, box)
-            if point_cloud is not None:
-                grasp._plan_and_execute_grasp(reachy, point_cloud, class_name)
+            result = grasp._build_object_point_cloud(depth_cam, class_name, box)
+            if result is not None:
+                point_cloud, width_m, height_m = result
+                grasp._plan_and_execute_grasp(reachy, point_cloud, width_m, height_m, class_name)
                 grasp._stream_torso_camera(depth_cam)
             break
         # No -> back to the same captured frame/detections, all blue again

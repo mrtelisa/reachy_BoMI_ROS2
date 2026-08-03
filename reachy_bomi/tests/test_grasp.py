@@ -81,11 +81,11 @@ def _show_point_cloud_with_grasp(point_cloud, p_pre, p_grasp, class_name) -> Non
     plt.show()
 
 
-def _plan_and_visualize_grasp(reachy, point_cloud, class_name) -> None:
+def _plan_and_visualize_grasp(reachy, point_cloud, width_m, height_m, class_name) -> None:
     """Same bridging as detection._plan_and_execute_grasp, but stops at
     plan_grasp() -- execute_grasp() is deliberately never called here."""
     try:
-        p_front, width_m, height_m, shape = reachy_grasp.point_cloud_to_grasp_input(point_cloud, class_name)
+        p_front, shape = reachy_grasp.point_cloud_to_grasp_input(point_cloud, class_name)
         arm = reachy_grasp.pick_arm(reachy, p_front)
         plan = reachy_grasp.plan_grasp(arm, p_front, width_m, height_m, shape)
     except reachy_grasp.ObjectTooWideError as e:
@@ -122,9 +122,10 @@ def _run_grasp_dry_run(cap, landmarker, bomi_map, cursor_filter, depth_cam, mode
         if decision is None:
             break
         if decision:
-            point_cloud = detection._build_object_point_cloud(depth_cam, class_name, box)
-            if point_cloud is not None:
-                _plan_and_visualize_grasp(reachy, point_cloud, class_name)
+            result = detection._build_object_point_cloud(depth_cam, class_name, box)
+            if result is not None:
+                point_cloud, width_m, height_m = result
+                _plan_and_visualize_grasp(reachy, point_cloud, width_m, height_m, class_name)
                 detection._stream_torso_camera(depth_cam)
             break
         # No -> back to the same captured frame/detections, all blue again

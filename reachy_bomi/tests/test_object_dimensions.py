@@ -29,8 +29,10 @@ import argparse
 import os
 import sys
 import time
+from typing import Tuple
 
 import cv2
+import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -40,21 +42,44 @@ from ultralytics import YOLO
 import bomi_detection as grasp
 import reachy_grasp
 
-DEFAULT_ROBOT_IP = "192.168.0.124"
+DEFAULT_ROBOT_IP = "192.168.0.121"
+
+
+def _box_eccentricity_deg(K, box) -> Tuple[float, float]:
+    """Angular offset of the box center from the optical axis (0,0 = dead
+    center), horizontal/vertical. Lets us correlate a size error with how
+    far off to the side/top/bottom the object was, instead of guessing from
+    the video."""
+    x1, y1, x2, y2 = box
+    u, v = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    fx, cx = K[0, 0], K[0, 2]
+    fy, cy = K[1, 1], K[1, 2]
+    return float(np.degrees(np.arctan2(u - cx, fx))), float(np.degrees(np.arctan2(v - cy, fy)))
 
 
 def _measure_and_print(depth_cam, class_name: str, box) -> None:
-    """Runs the same point-cloud pipeline used for grasping (bbox crop +
-    10-frame median fusion), but skips its point-cloud plot (show=False)
-    so the live stream isn't interrupted by a modal window every time."""
-    point_cloud = grasp._build_object_point_cloud(depth_cam, class_name, box, show=False)
-    if point_cloud is None or point_cloud.shape[0] == 0:
+    """Runs the same pipeline used for grasping (bbox crop + 10-frame median
+    fusion -> point cloud for position, PCA-based width/height), with its 4
+    diagnostic point-cloud plots (show=True) -- non-blocking, so they don't
+    interrupt the live stream."""
+    result = grasp._build_object_point_cloud(depth_cam, class_name, box, show=True)
+    if result is None:
+        print(f"[{class_name}] no valid depth points, cannot estimate size")
+        return
+    point_cloud, width_m, height_m = result
+    if point_cloud.shape[0] == 0:
         print(f"[{class_name}] no valid depth points, cannot estimate size")
         return
 
-    _, width_m, height_m, shape = reachy_grasp.point_cloud_to_grasp_input(point_cloud, class_name)
+    _, shape = reachy_grasp.point_cloud_to_grasp_input(point_cloud, class_name)
     print(f"[{class_name}]  shape={shape:<8}  width={width_m * 100:5.1f} cm  "
           f"height={height_m * 100:5.1f} cm  ({len(point_cloud)} points)")
+
+    params = depth_cam.get_parameters(view=grasp.CameraView.LEFT)
+    if params is not None:
+        _, _, _, _, K, _, _ = params
+        ecc_x_deg, ecc_y_deg = _box_eccentricity_deg(K, box)
+        print(f"           off-axis: {ecc_x_deg:+5.1f} deg horiz, {ecc_y_deg:+5.1f} deg vert")
 
 
 def _stream_and_measure(depth_cam, model: YOLO, confidence: float) -> None:
