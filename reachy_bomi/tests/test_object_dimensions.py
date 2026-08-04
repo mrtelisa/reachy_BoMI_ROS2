@@ -62,7 +62,7 @@ def _measure_and_print(depth_cam, class_name: str, box) -> None:
     fusion -> point cloud for position, PCA-based width/height), with its 4
     diagnostic point-cloud plots (show=True) -- non-blocking, so they don't
     interrupt the live stream."""
-    result = grasp._build_object_point_cloud(depth_cam, class_name, box, show=True)
+    result = grasp._build_object_point_cloud(depth_cam, class_name, box, show=False)
     if result is None:
         print(f"[{class_name}] no valid depth points, cannot estimate size")
         return
