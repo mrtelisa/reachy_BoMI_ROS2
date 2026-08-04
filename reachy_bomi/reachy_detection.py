@@ -9,7 +9,7 @@ Dependencies:
     pip install reachy2-sdk opencv-python numpy ultralytics matplotlib open3d
 
 Usage:
-    python3 bomi_detection.py [robot_ip]
+    python3 reachy_detection.py [robot_ip]
 
     <robot_ip> is optional; if omitted, DEFAULT_ROBOT_IP (set in this file) is used.
 
@@ -40,8 +40,6 @@ from reachy2_sdk.media.camera import CameraView, DepthCamera
 from reachy2_sdk.utils.utils import invert_affine_transformation_matrix
 from ultralytics import YOLO
 
-import reachy_grasp
-
 # Placeholder — replace with the robot's actual IP.
 DEFAULT_ROBOT_IP = "192.168.0.104"
 
@@ -57,6 +55,29 @@ GRASPABLE_CLASSES = {
     "fork", "knife", "teddy bear", "toothbrush", "mouse", "cake",
     "donut", "carrot", "broccoli", "hair drier", "vase", "book"
 }
+
+# Rough shape prior from the YOLO class, used by _object_dimensions to decide
+# whether to use the cylinder circle fit. Flat/rectangular items map to
+# "box"; blocky/roughly-cubic ones to "cube" (geometrically identical here,
+# kept distinct only for readability).
+SHAPE_BY_CLASS = {
+    "bottle": "cylinder", "cup": "cylinder", "wine glass": "cylinder", "vase": "cylinder",
+    "carrot": "cylinder", "hair drier": "cylinder", "toothbrush": "cylinder",
+    "spoon": "cylinder", "fork": "cylinder", "knife": "cylinder", "banana": "cylinder",
+    "apple": "sphere", "orange": "sphere", "donut": "sphere",
+    "book": "box", "cell phone": "box", "remote": "box", "laptop": "box",
+    "keyboard": "box", "tv": "box", "sandwich": "box",
+    "mouse": "cube", "bowl": "cube", "cake": "cube", "teddy bear": "cube",
+    "broccoli": "cube", "scissors": "cube",
+}
+DEFAULT_SHAPE = "cylinder"
+
+
+def shape_from_class(class_name: str) -> str:
+    """Rough shape prior from the YOLO class name; defaults to cylinder for
+    anything not in the table."""
+    return SHAPE_BY_CLASS.get(class_name, DEFAULT_SHAPE)
+
 
 Detection = Tuple[str, float, Tuple[int, int, int, int]]  # class_name, confidence, (x1, y1, x2, y2)
 Box = Tuple[int, int, int, int]
@@ -698,7 +719,7 @@ def _build_object_point_cloud(
     if show:
         _show_point_cloud(point_cloud, f"{class_name} - 4 finale")
 
-    shape = reachy_grasp.shape_from_class(class_name)
+    shape = shape_from_class(class_name)
     width_m, height_m = _object_dimensions(point_cloud, shape)
     box_w_px, box_h_px = box[2] - box[0], box[3] - box[1]
     print(f"Box: {box_w_px}x{box_h_px}px (axis-aligned)  shape={shape}  -> "

@@ -39,8 +39,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from reachy2_sdk import ReachySDK
 from ultralytics import YOLO
 
-import bomi_detection as grasp
-import reachy_grasp
+import reachy_detection as grasp
 
 DEFAULT_ROBOT_IP = "192.168.0.121"
 
@@ -71,7 +70,7 @@ def _measure_and_print(depth_cam, class_name: str, box) -> None:
         print(f"[{class_name}] no valid depth points, cannot estimate size")
         return
 
-    shape = reachy_grasp.shape_from_class(class_name)
+    shape = grasp.shape_from_class(class_name)
     print(f"[{class_name}]  shape={shape:<8}  width={width_m * 100:5.1f} cm  "
           f"height={height_m * 100:5.1f} cm  ({len(point_cloud)} points)")
 

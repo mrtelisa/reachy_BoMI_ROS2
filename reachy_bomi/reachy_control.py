@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 BoMI teleop + grasp selection for Reachy2: merges bomi_teleop.py and
-bomi_detection.py into a single BoMI cursor. Driving the mobile base and hovering
+reachy_detection.py into a single BoMI cursor. Driving the mobile base and hovering
 YOLO boxes/buttons in the grasp UI both use the same hand-tracked PCA cursor —
 there's no mouse involved anywhere.
 
@@ -40,7 +40,7 @@ Phase 3.5 - Pre-grasping pose (opened from Control):
     object selection.
 
 Phase 4 - Object selection / grasp (opened from Control):
-    Same capture -> hover-to-select -> Yes/No confirm flow as bomi_detection.py,
+    Same capture -> hover-to-select -> Yes/No confirm flow as reachy_detection.py,
     and every hover point is the BoMI cursor (mapped into that window's pixel
     space). Answering "No" or quitting (Q/ESC/X) returns to Control.
 """
@@ -60,7 +60,7 @@ from mediapipe.tasks.python.vision.core import vision_task_running_mode
 from reachy2_sdk import ReachySDK
 from ultralytics import YOLO
 
-import bomi_detection as grasp
+import reachy_detection as grasp
 import bomi_teleop as teleop
 
 # Placeholder — replace with the robot's actual IP.
@@ -128,13 +128,13 @@ def _draw_bomi_cursor(frame, x: int, y: int) -> None:
     cv2.drawMarker(frame, (x, y), COLOR_CURSOR, markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
 
 
-# --- BoMI-cursor equivalents of bomi_detection's mouse-driven UI ---
+# --- BoMI-cursor equivalents of reachy_detection's mouse-driven UI ---
 
 def _select_object_to_grasp_bomi(
     cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
     depth_cam, model, confidence, captured,
 ):
-    """Same hover-to-select/hover-Refresh loop as bomi_detection._select_object_to_grasp,
+    """Same hover-to-select/hover-Refresh loop as reachy_detection._select_object_to_grasp,
     but the hover point is the BoMI cursor mapped into the captured frame."""
     base_frame, detections, labels = captured
     frame_h, frame_w = base_frame.shape[:2]
@@ -203,7 +203,7 @@ def _select_object_to_grasp_bomi(
 
 
 def _confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, class_name):
-    """Same Yes/No dwell dialog as bomi_detection._confirm_grasp, hovered with the
+    """Same Yes/No dwell dialog as reachy_detection._confirm_grasp, hovered with the
     BoMI cursor mapped into the confirm canvas instead of the mouse."""
     yes_hover_start = None
     no_hover_start = None
@@ -239,7 +239,7 @@ def _confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, 
 
 
 def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, reachy, crs_x, crs_y):
-    """BoMI-driven equivalent of bomi_detection._show_torso_camera: capture ->
+    """BoMI-driven equivalent of reachy_detection._show_torso_camera: capture ->
     hover-select -> confirm, looping back on "No" until an object is
     confirmed (then builds its point cloud and streams the live feed --
     grasp planning/execution is not implemented yet) or the user quits."""
@@ -294,7 +294,7 @@ def _draw_wait_canvas(progress: float) -> np.ndarray:
     """Dedicated canvas shown in its own window while the arms
     move into the pre-grasping pose -- a small text overlay on the
     already-open, busy camera feed is too easy to miss, so this pops up as
-    a separate window instead, like bomi_detection's confirm dialog."""
+    a separate window instead, like reachy_detection's confirm dialog."""
     canvas = np.full((WAIT_CANVAS_HEIGHT, WAIT_CANVAS_WIDTH, 3), 30, dtype=np.uint8)
     cv2.putText(canvas, "Waiting that the robot",
                 (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
