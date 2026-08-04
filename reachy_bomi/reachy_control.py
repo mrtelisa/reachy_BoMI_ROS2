@@ -61,6 +61,7 @@ from reachy2_sdk import ReachySDK
 from ultralytics import YOLO
 
 import reachy_detection as grasp
+import reachy_grasp
 import bomi_teleop as teleop
 
 # Placeholder — replace with the robot's actual IP.
@@ -132,7 +133,7 @@ def _draw_bomi_cursor(frame, x: int, y: int) -> None:
 
 def _select_object_to_grasp_bomi(
     cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
-    depth_cam, model, confidence, captured,
+    depth_cam, model, confidence, captured, reachy,
 ):
     """Same hover-to-select/hover-Refresh loop as reachy_detection._select_object_to_grasp,
     but the hover point is the BoMI cursor mapped into the captured frame."""
@@ -158,7 +159,7 @@ def _select_object_to_grasp_bomi(
         elif button_hover_start is None:
             button_hover_start = now
         elif now - button_hover_start >= grasp.REFRESH_HOVER_SECONDS:
-            refreshed = grasp._capture_and_detect(depth_cam, model, confidence)
+            refreshed = grasp._capture_and_detect(depth_cam, model, confidence, reachy)
             if refreshed is not None:
                 base_frame, detections, labels = refreshed
                 frame_h, frame_w = base_frame.shape[:2]
@@ -241,16 +242,16 @@ def _confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, 
 def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, reachy, crs_x, crs_y):
     """BoMI-driven equivalent of reachy_detection._show_torso_camera: capture ->
     hover-select -> confirm, looping back on "No" until an object is
-    confirmed (then builds its point cloud and streams the live feed --
-    grasp planning/execution is not implemented yet) or the user quits."""
-    captured = grasp._capture_and_detect(depth_cam, model, confidence)
+    confirmed (then builds its point cloud, plans and executes the grasp,
+    and streams the live feed) or the user quits."""
+    captured = grasp._capture_and_detect(depth_cam, model, confidence, reachy)
     if captured is None:
         return crs_x, crs_y
 
     while True:
         class_name, box, captured, crs_x, crs_y = _select_object_to_grasp_bomi(
             cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
-            depth_cam, model, confidence, captured,
+            depth_cam, model, confidence, captured, reachy,
         )
         if class_name is None:
             break
@@ -261,11 +262,17 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
         if decision is None:
             break
         if decision:
-            result = grasp._build_object_point_cloud(depth_cam, class_name, box)
-            if result is not None:
-                _, width_m, height_m = result
-                print(f"[{class_name}] estimated width={width_m * 100:.1f}cm  "
-                      f"height={height_m * 100:.1f}cm -- grasp planning not implemented yet")
+            geometry = grasp._build_object_point_cloud(depth_cam, class_name, box)
+            if geometry is not None:
+                print(f"[{class_name}] estimated width={geometry.width_m * 100:.1f}cm  "
+                      f"height={geometry.height_m * 100:.1f}cm")
+                plan = reachy_grasp.plan_grasp(reachy, geometry)
+                if plan is None:
+                    print(f"[{class_name}] no feasible grasp (too wide for the gripper, "
+                          "or its pose couldn't be estimated)")
+                else:
+                    reachy_grasp.show_grasp_plan(geometry, plan)
+                    reachy_grasp.execute_grasp(reachy, plan)
                 grasp._stream_torso_camera(depth_cam)
             break
         # No -> back to the same captured frame/detections, all blue again

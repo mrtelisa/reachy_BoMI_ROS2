@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from reachy2_sdk import ReachySDK
 from ultralytics import YOLO
 
-import reachy_detection as grasp
+import reachy_detection
 
 DEFAULT_ROBOT_IP = "192.168.0.121"
 
@@ -58,23 +58,17 @@ def _box_eccentricity_deg(K, box) -> Tuple[float, float]:
 
 def _measure_and_print(depth_cam, class_name: str, box) -> None:
     """Runs the same pipeline used for grasping (bbox crop + 10-frame median
-    fusion -> point cloud for position, PCA-based width/height), with its 4
-    diagnostic point-cloud plots (show=True) -- non-blocking, so they don't
-    interrupt the live stream."""
-    result = grasp._build_object_point_cloud(depth_cam, class_name, box, show=False)
-    if result is None:
-        print(f"[{class_name}] no valid depth points, cannot estimate size")
-        return
-    point_cloud, width_m, height_m = result
-    if point_cloud.shape[0] == 0:
+    fusion -> point cloud for position, PCA-based width/height); no plot,
+    just prints the result."""
+    geometry = reachy_detection._build_object_point_cloud(depth_cam, class_name, box)
+    if geometry is None or geometry.point_cloud.shape[0] == 0:
         print(f"[{class_name}] no valid depth points, cannot estimate size")
         return
 
-    shape = grasp.shape_from_class(class_name)
-    print(f"[{class_name}]  shape={shape:<8}  width={width_m * 100:5.1f} cm  "
-          f"height={height_m * 100:5.1f} cm  ({len(point_cloud)} points)")
+    print(f"[{class_name}]  shape={geometry.shape:<8}  width={geometry.width_m * 100:5.1f} cm  "
+          f"height={geometry.height_m * 100:5.1f} cm  ({len(geometry.point_cloud)} points)")
 
-    params = depth_cam.get_parameters(view=grasp.CameraView.LEFT)
+    params = depth_cam.get_parameters(view=reachy_detection.CameraView.LEFT)
     if params is not None:
         _, _, _, _, K, _, _ = params
         ecc_x_deg, ecc_y_deg = _box_eccentricity_deg(K, box)
@@ -82,40 +76,40 @@ def _measure_and_print(depth_cam, class_name: str, box) -> None:
 
 
 def _stream_and_measure(depth_cam, model: YOLO, confidence: float) -> None:
-    mouse = grasp._MouseTracker(grasp.CAM_WINDOW_NAME)
+    mouse = reachy_detection._MouseTracker(reachy_detection.CAM_WINDOW_NAME)
     hovered_box = None
     hover_start = None
 
     print(f"\n=== LIVE DIMENSION CHECK ===  Q = quit  |  hover a box for "
-          f"{grasp.HOVER_HOLD_SECONDS:.0f}s to print its estimated size")
+          f"{reachy_detection.HOVER_HOLD_SECONDS:.0f}s to print its estimated size")
 
     while True:
-        result = depth_cam.get_frame(view=grasp.CameraView.LEFT)
+        result = depth_cam.get_frame(view=reachy_detection.CameraView.LEFT)
         if result is None:
             continue
         frame, _timestamp = result
 
-        detections = grasp._detect_graspable_objects(model, frame, confidence)
-        hovered = grasp._find_hovered_detection(detections, mouse.x, mouse.y)
+        detections = reachy_detection._detect_graspable_objects(model, frame, confidence)
+        hovered = reachy_detection._find_hovered_detection(detections, mouse.x, mouse.y)
         now = time.time()
 
         if hovered is None:
             hovered_box, hover_start = None, None
         else:
             box = hovered[2]
-            if hovered_box is None or grasp._iou(box, hovered_box) < grasp.HOVER_IOU_MATCH:
+            if hovered_box is None or reachy_detection._iou(box, hovered_box) < reachy_detection.HOVER_IOU_MATCH:
                 hover_start = now
             hovered_box = box
         hover_duration = (now - hover_start) if hover_start is not None else 0.0
-        is_held = hovered is not None and hover_duration >= grasp.HOVER_HOLD_SECONDS
+        is_held = hovered is not None and hover_duration >= reachy_detection.HOVER_HOLD_SECONDS
 
-        hover_progress = min(hover_duration / grasp.HOVER_HOLD_SECONDS, 1.0) if hovered is not None else 0.0
+        hover_progress = min(hover_duration / reachy_detection.HOVER_HOLD_SECONDS, 1.0) if hovered is not None else 0.0
         for class_name, conf, box in detections:
             is_hovered = hovered is not None and box == hovered[2]
-            color = grasp.COLOR_GREEN if (is_hovered and is_held) else (
-                grasp.COLOR_YELLOW if is_hovered else grasp.COLOR_BLUE)
-            grasp._draw_box(frame, box, f"{class_name} {conf:.2f}", color, hover_progress if is_hovered else 0.0)
-        cv2.imshow(grasp.CAM_WINDOW_NAME, frame)
+            color = reachy_detection.COLOR_GREEN if (is_hovered and is_held) else (
+                reachy_detection.COLOR_YELLOW if is_hovered else reachy_detection.COLOR_BLUE)
+            reachy_detection._draw_box(frame, box, f"{class_name} {conf:.2f}", color, hover_progress if is_hovered else 0.0)
+        cv2.imshow(reachy_detection.CAM_WINDOW_NAME, frame)
 
         if is_held:
             class_name, _conf, box = hovered
@@ -123,10 +117,10 @@ def _stream_and_measure(depth_cam, model: YOLO, confidence: float) -> None:
             hovered_box, hover_start = None, None  # needs a fresh hold to fire again
 
         key = cv2.waitKey(1) & 0xFF
-        if grasp._quit_requested(key, grasp.CAM_WINDOW_NAME):
+        if reachy_detection._quit_requested(key, reachy_detection.CAM_WINDOW_NAME):
             break
 
-    cv2.destroyWindow(grasp.CAM_WINDOW_NAME)
+    cv2.destroyWindow(reachy_detection.CAM_WINDOW_NAME)
 
 
 def main() -> None:
@@ -135,10 +129,10 @@ def main() -> None:
     )
     parser.add_argument("robot_ip", nargs="?", default=DEFAULT_ROBOT_IP,
                         help=f"IP address of the Reachy robot (default: {DEFAULT_ROBOT_IP})")
-    parser.add_argument("--yolo-model", default=grasp.YOLO_MODEL_PATH,
-                        help=f"Path to YOLOv8 weights (default: {grasp.YOLO_MODEL_PATH})")
-    parser.add_argument("--conf", type=float, default=grasp.YOLO_CONFIDENCE,
-                        help=f"Minimum detection confidence (default: {grasp.YOLO_CONFIDENCE})")
+    parser.add_argument("--yolo-model", default=reachy_detection.YOLO_MODEL_PATH,
+                        help=f"Path to YOLOv8 weights (default: {reachy_detection.YOLO_MODEL_PATH})")
+    parser.add_argument("--conf", type=float, default=reachy_detection.YOLO_CONFIDENCE,
+                        help=f"Minimum detection confidence (default: {reachy_detection.YOLO_CONFIDENCE})")
     cli_args = parser.parse_args()
 
     reachy = ReachySDK(host=cli_args.robot_ip)
