@@ -599,41 +599,20 @@ def _fit_cylinder_diameter(point_cloud: np.ndarray, slice_frac: float = 0.1) -> 
 
 
 def _object_dimensions(point_cloud: np.ndarray, shape: str) -> Tuple[float, float]:
-    """Object (width_m, height_m) from the point cloud's own 3D principal axes
-    (PCA on its covariance), instead of the old 2D-minAreaRect-plus-single-
-    median-depth approach: that one implicitly assumed the object's visible
-    face is roughly parallel to the image plane, so it broke down whenever
-    the object was tilted towards the camera. Using every point's own depth
-    instead of one reading stays correct in that case.
+    """Object (width_m, height_m) from PCA on point_cloud's principal axes
+    (already isolated to just the object -- see _remove_table_plane /
+    _largest_cluster). height_m is the largest extent, width_m the
+    second-largest, except for shape == "cylinder" (bottle, cup, ...): there
+    _fit_cylinder_diameter's circle fit replaces width_m, since a single view
+    only sees a partial arc and PCA extent underestimates the true diameter.
+    The third (smallest) extent is always dropped as unreliable "thickness":
+    a single view never sees behind the object.
 
-    point_cloud is expected to already be isolated to just the object (table
-    plane removed, largest cluster kept -- see _remove_table_plane /
-    _largest_cluster), so no extra cleanup happens here. Whatever frame
-    point_cloud is in (camera or robot) is irrelevant: PCA extents are
-    invariant to rigid rotation/translation.
-
-    height_m is always the largest PCA extent. width_m is normally the
-    second-largest extent, except when shape == "cylinder" (bottle, cup,
-    ...): there, _fit_cylinder_diameter's circle fit is used instead when it
-    succeeds, since a partial single-view arc makes the PCA extent
-    underestimate a round object's true diameter (see that function's
-    docstring). The third, smallest PCA extent (would-be object thickness)
-    is always dropped: a single depth view only ever sees the object's front
-    shell, so that axis measures noise/tilt of that one face, not real
-    thickness.
-
-    Extents use the 1st-99th percentile spread per axis, not raw max-min:
-    _remove_flying_pixels/_remove_table_plane/_largest_cluster usually leave
-    point_cloud clean, but on the rare point that slips through anyway (a
-    sliver of table stuck to the object's base, a leftover flying-pixel
-    bridge), a raw max-min lets that single straggler inflate the whole
-    measurement. The cut has to stay this gentle, though: depth sensors
-    already return few/no points on curved or specular surfaces seen at a
-    grazing angle (e.g. a bottle's cap/shoulder), so that end of the object
-    is naturally sparse in genuine, non-contaminating points -- a more
-    aggressive percentile (like the 5th-95th _fit_cylinder_diameter uses for
-    its own, different purpose of picking a mid-height band) would count
-    that real sparse data as if it were the outlier and shave real height off.
+    Extents use the 1st-99th percentile spread, not raw max-min, so one
+    stray leftover point (a table sliver, a flying-pixel bridge) can't
+    inflate the result -- kept deliberately gentle (vs. the 5th-95th
+    _fit_cylinder_diameter uses for a different purpose) since sparse-but-
+    real points are expected at curved/specular ends (e.g. a bottle's cap).
     Returns (0.0, 0.0) if too few points remain to fit axes."""
     if point_cloud.shape[0] < 3:
         return 0.0, 0.0
@@ -729,25 +708,6 @@ def _build_object_point_cloud(
     return point_cloud, width_m, height_m
 
 
-def _plan_and_execute_grasp(
-    reachy: ReachySDK, point_cloud: np.ndarray, width_m: float, height_m: float, class_name: str,
-) -> None:
-    """Bridges the point cloud (position) and box-based size into
-    reachy_grasp's shape-prior planner, and runs the grasp.
-    ObjectTooWideError/GraspNotReachableError are expected, recoverable
-    outcomes (not bugs), so they're reported and swallowed."""
-    try:
-        p_front, shape = reachy_grasp.point_cloud_to_grasp_input(point_cloud, class_name)
-        arm = reachy_grasp.pick_arm(reachy, p_front)
-        plan = reachy_grasp.plan_grasp(arm, p_front, width_m, height_m, shape)
-    except reachy_grasp.ObjectTooWideError as e:
-        print(f"[User] {e}")
-    except reachy_grasp.GraspNotReachableError as e:
-        print(f"[Error] {e}")
-    else:
-        reachy_grasp.execute_grasp(arm, plan)
-
-
 def _show_torso_camera(reachy: ReachySDK, model: YOLO, confidence: float) -> None:
     depth_cam = reachy.cameras.depth
     if depth_cam is None:
@@ -769,8 +729,9 @@ def _show_torso_camera(reachy: ReachySDK, model: YOLO, confidence: float) -> Non
         if decision:
             result = _build_object_point_cloud(depth_cam, class_name, box)
             if result is not None:
-                point_cloud, width_m, height_m = result
-                _plan_and_execute_grasp(reachy, point_cloud, width_m, height_m, class_name)
+                _, width_m, height_m = result
+                print(f"[{class_name}] estimated width={width_m * 100:.1f}cm  "
+                      f"height={height_m * 100:.1f}cm -- grasp planning not implemented yet")
                 _stream_torso_camera(depth_cam)
             break
         # No -> back to the same captured frame/detections, all blue again

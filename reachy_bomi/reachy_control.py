@@ -241,8 +241,8 @@ def _confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, 
 def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, reachy, crs_x, crs_y):
     """BoMI-driven equivalent of bomi_detection._show_torso_camera: capture ->
     hover-select -> confirm, looping back on "No" until an object is
-    confirmed (then builds its point cloud, plans/executes the grasp, and
-    streams the live feed) or the user quits."""
+    confirmed (then builds its point cloud and streams the live feed --
+    grasp planning/execution is not implemented yet) or the user quits."""
     captured = grasp._capture_and_detect(depth_cam, model, confidence)
     if captured is None:
         return crs_x, crs_y
@@ -263,8 +263,9 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
         if decision:
             result = grasp._build_object_point_cloud(depth_cam, class_name, box)
             if result is not None:
-                point_cloud, width_m, height_m = result
-                grasp._plan_and_execute_grasp(reachy, point_cloud, width_m, height_m, class_name)
+                _, width_m, height_m = result
+                print(f"[{class_name}] estimated width={width_m * 100:.1f}cm  "
+                      f"height={height_m * 100:.1f}cm -- grasp planning not implemented yet")
                 grasp._stream_torso_camera(depth_cam)
             break
         # No -> back to the same captured frame/detections, all blue again

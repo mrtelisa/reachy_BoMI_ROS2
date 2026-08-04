@@ -71,7 +71,7 @@ def _measure_and_print(depth_cam, class_name: str, box) -> None:
         print(f"[{class_name}] no valid depth points, cannot estimate size")
         return
 
-    _, shape = reachy_grasp.point_cloud_to_grasp_input(point_cloud, class_name)
+    shape = reachy_grasp.shape_from_class(class_name)
     print(f"[{class_name}]  shape={shape:<8}  width={width_m * 100:5.1f} cm  "
           f"height={height_m * 100:5.1f} cm  ({len(point_cloud)} points)")
 
