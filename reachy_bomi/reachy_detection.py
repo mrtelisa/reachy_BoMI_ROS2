@@ -32,7 +32,6 @@ import time
 from typing import List, Optional, Tuple
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
 import open3d as o3d
 from reachy2_sdk import ReachySDK
@@ -40,6 +39,7 @@ from reachy2_sdk.media.camera import CameraView, DepthCamera
 from reachy2_sdk.utils.utils import invert_affine_transformation_matrix
 from ultralytics import YOLO
 
+import graphs
 import reachy_grasp
 
 # Placeholder — replace with the robot's actual IP.
@@ -400,22 +400,11 @@ def _select_object_to_grasp(
 
 # --- Point cloud pipeline (first step towards an actual grasp pose) ---
 #
-# Once an object is confirmed, everything outside its bbox is irrelevant to
-# its own shape, so the crop below throws it away. A pixel margin is added
-# around the YOLO box so a tight detection doesn't clip part of the object
-# out of the cloud -- and, just as importantly, so the crop still contains
-# a real, sizeable patch of table around the object. _remove_table_plane's
-# RANSAC fit needs enough genuine table inliers to reliably win against the
-# object's own points; a YOLO box padded by only a few pixels can leave
-# RANSAC with barely any real table in the crop, so it locks onto a
-# spurious "plane" using a grazing tangent of the object's curved surface
-# instead. That produces two symptoms at once: real object points near
-# that wrong plane get stripped (an object that looks cut off partway up),
-# and the fitted table_normal ends up far from vertical, which
-# reachy_grasp.plan_grasp uses directly as its top-down approach direction
-# (so the "pre-grasp" ends up offset sideways instead of straight above the
-# object). If that happens even with generous padding, the printed table
-# normal below is the thing to check first.
+# Crop margin around the YOLO box: generous on purpose, not just to avoid
+# clipping the object, but so _remove_table_plane's RANSAC fit has enough
+# real table in the crop to reliably win against the object's own curved
+# surface (see its docstring -- Table normal print is the check if that
+# ever goes wrong again).
 BBOX_PADDING_PX = 60
 
 
@@ -454,11 +443,11 @@ def _depth_crop_to_point_cloud(
 
     With correct_distortion (the default), lens distortion is corrected via
     cv2.undistortPointsIter -- pixel_to_world's own K_inv @ [u,v,1] doesn't,
-    which is fine near the image center but increasingly wrong towards the
-    edges of a wide-FOV lens. correct_distortion=False instead replicates
-    that same uncorrected K_inv @ [u,v,1] math, only to let callers plot a
-    "before distortion correction" point cloud for comparison -- it should
-    never be used for an actual size/position estimate."""
+    which matters increasingly towards the edges of this wide-FOV lens.
+    correct_distortion=False replicates that same uncorrected math instead,
+    only for callers plotting a "before correction" comparison (see
+    commented-out plots in _build_object_point_cloud) -- never for an
+    actual size/position estimate."""
     x1, y1, _, _ = box
     rows, cols = np.nonzero(depth_crop > 0)
     if rows.size == 0:
@@ -475,14 +464,13 @@ def _depth_crop_to_point_cloud(
     z_c = depth_crop[rows, cols].astype(np.float64) / 1000.0
 
     if correct_distortion:
+        # undistortPointsIter over undistortPoints: the latter always runs
+        # a fixed 5 iterations with no convergence check, leaving a
+        # residual error at the edges of this wide-FOV lens; the Iter
+        # variant takes a real stopping criterion (at the cost of passing
+        # identity R/P explicitly, which undistortPoints defaults
+        # internally when omitted).
         uv_points = np.stack([u, v], axis=1).reshape(-1, 1, 2)
-        # cv2.undistortPoints has no way to raise its iteration count -- it always
-        # runs a fixed 5 iterations with no convergence check, which is enough near
-        # the image center (small distortion, good initial guess) but not at the
-        # edges of this wide-FOV rational-model lens, where it leaves a residual
-        # error. undistortPointsIter is the same solver with a real criteria arg,
-        # at the cost of having to pass identity R/P explicitly (undistortPoints
-        # defaults those to identity internally when omitted).
         undistort_criteria = (cv2.TERM_CRITERIA_MAX_ITER + cv2.TERM_CRITERIA_EPS, 100, 1e-6)
         undistorted = cv2.undistortPointsIter(
             uv_points, K, D, np.eye(3), np.eye(3), undistort_criteria
@@ -526,16 +514,11 @@ def _remove_table_plane(
     point_cloud: np.ndarray, distance_threshold: float = TABLE_PLANE_DISTANCE_M,
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """RANSAC-fits the single dominant plane in point_cloud -- the table --
-    and returns everything else, plus that plane's unit normal (oriented to
-    point up and away from the table, i.e. towards the camera). Unlike the
-    old crop-local depth-tolerance heuristic this replaces (which only
-    worked because a tight box makes the object the majority of its valid
-    pixels), plane fitting doesn't care how much of the cloud is table
-    versus object, or at what angle the table sits relative to the camera
-    (this camera's fixed 47.5 deg downward tilt included) -- it just finds
-    whatever the largest flat surface is. The normal is what reachy_grasp
-    uses as its "up" direction when planning a grasp approach.
-    Returns (point_cloud, None) if too few points to fit a plane."""
+    and returns everything else, plus that plane's unit normal (oriented up
+    and away from the table). Works regardless of how much of the cloud is
+    table vs. object or the table's angle relative to the camera -- it just
+    finds the largest flat surface. reachy_grasp uses the normal as its "up"
+    direction. Returns (point_cloud, None) if too few points to fit."""
     if point_cloud.shape[0] < 4:
         return point_cloud, None
     pcd = o3d.geometry.PointCloud()
@@ -571,60 +554,16 @@ def _largest_cluster(point_cloud: np.ndarray, eps: float = CLUSTER_EPS_M, min_po
     return point_cloud[labels == largest_label]
 
 
-def _show_point_cloud(point_cloud: np.ndarray, class_name: str) -> None:
-    """Non-blocking 3D scatter view of the fused point cloud (Reachy
-    coordinates, meters), colored by height. Doesn't pause the pipeline, so
-    _build_object_point_cloud's 4 diagnostic stages all stay open side by
-    side for comparison instead of having to close one before the next
-    appears."""
-    if point_cloud.shape[0] == 0:
-        print("[WARN] Point cloud is empty, nothing to show")
-        return
-
-    fig = plt.figure(f"Point cloud - {class_name}")
-    ax = fig.add_subplot(projection="3d")
-    xs, ys, zs = point_cloud[:, 0], point_cloud[:, 1], point_cloud[:, 2]
-    scatter = ax.scatter(xs, ys, zs, c=zs, cmap="viridis", s=4)
-    ax.set_xlabel("x (m)")
-    ax.set_ylabel("y (m)")
-    ax.set_zlabel("z (m)")
-    ax.set_title(f"{class_name}: {len(point_cloud)} points")
-    fig.colorbar(scatter, ax=ax, shrink=0.6, label="z (m)")
-
-    # Equal aspect ratio on all three axes, so the object's proportions
-    # aren't visually distorted by whichever axis happens to span more.
-    ranges = point_cloud.max(axis=0) - point_cloud.min(axis=0)
-    half_range = max(ranges.max() / 2.0, 1e-3)
-    mid = point_cloud.mean(axis=0)
-    ax.set_xlim(mid[0] - half_range, mid[0] + half_range)
-    ax.set_ylim(mid[1] - half_range, mid[1] + half_range)
-    ax.set_zlim(mid[2] - half_range, mid[2] + half_range)
-
-    plt.show(block=False)
-    plt.pause(0.001)
-
-
 def _fit_cylinder_circle(
     point_cloud: np.ndarray, centroid: np.ndarray, long_axis: np.ndarray, cross_axes: np.ndarray,
     slice_frac: float = 0.1,
 ) -> Optional[Tuple[np.ndarray, float]]:
-    """True circle (center, radius) of a cylindrical object's cross-section
-    (bottle, cup, ...), least-squares (Kasa) fit to a thin band of points
-    around its mid-height (measured along long_axis) in the 2D frame
-    spanned by cross_axes -- instead of reading either off raw PCA extent
-    or the raw point mean. A single view only ever sees a partial arc of
-    the object's circumference, never a full circle, so both are wrong the
-    same way: extent (the distance between the two farthest sampled points)
-    underestimates the true diameter whenever less than a semicircle is
-    visible, and the point centroid sits on that visible arc -- offset
-    towards the camera from the true central axis, not at it. A
-    least-squares circle fit extrapolates the true circle (center and
-    radius) from that partial arc instead.
-
-    Returns (center, radius) with center in the same 3D frame as
-    point_cloud/centroid, or None if too few points fall in the mid-height
-    band.
-    """
+    """True circle (center, radius) of a cylindrical object's cross-section,
+    least-squares (Kasa) fit to a thin band of points around its mid-height
+    -- not read off raw PCA extent or the point mean, both of which are
+    biased since a single view only ever sees a partial arc of the
+    circumference, never the full circle. Returns (center, radius) in the
+    same 3D frame as point_cloud, or None if too few points in the band."""
     centered = point_cloud - centroid
     heights = centered @ long_axis
     lo, hi = np.percentile(heights, [5, 95])
@@ -645,19 +584,10 @@ def _fit_cylinder_circle(
 
 
 def _fit_sphere_center(point_cloud: np.ndarray) -> Optional[Tuple[np.ndarray, float]]:
-    """True (center, radius) of a round object (apple, orange, ...),
-    least-squares fit directly to point_cloud -- the same Kasa-style linear
-    trick as _fit_cylinder_circle, generalized from a circle to a sphere.
-    Simpler than the cylinder case: a sphere is isotropic, so there's no
-    long axis to slice a band around first, the whole point cloud is used
-    directly. Corrects the same partial-view bias: point_cloud is only ever
-    the object's near-facing cap, never the far side, so its raw extent
-    underestimates the true diameter and its raw mean sits on that visible
-    cap, offset from the true center towards the camera.
-
-    Returns (center, radius) in the same frame as point_cloud, or None if
-    too few points.
-    """
+    """True (center, radius) of a round object, same Kasa-style least-squares
+    fit as _fit_cylinder_circle generalized to a sphere -- simpler, since a
+    sphere is isotropic and needs no long axis/band, the whole point cloud
+    is used directly. Returns None if too few points."""
     if point_cloud.shape[0] < 20:
         return None
     guess = point_cloud.mean(axis=0)
@@ -674,31 +604,20 @@ def _fit_sphere_center(point_cloud: np.ndarray) -> Optional[Tuple[np.ndarray, fl
 def _object_dimensions(
     point_cloud: np.ndarray, shape: str,
 ) -> Tuple[float, float, Optional[np.ndarray], Optional[np.ndarray]]:
-    """Object (width_m, height_m, centroid, axes) from PCA on point_cloud's
-    principal axes (already isolated to just the object -- see
-    _remove_table_plane / _largest_cluster). height_m is the largest extent,
-    width_m the second-largest, except for "cylinder" (bottle, cup, ...) and
-    "sphere" (apple, orange, ...) -- the only two shapes SHAPE_BY_CLASS
-    produces -- where a least-squares circle/sphere fit
-    (_fit_cylinder_circle / _fit_sphere_center) replaces both
-    width_m/height_m *and* centroid: a single view only ever sees the
-    near-facing part of a round object, never the far side, so raw PCA
-    extent underestimates the true diameter, and the raw point mean sits on
-    that visible surface, offset from the true axis/center towards the
-    camera rather than at it. Both fits rely on the object actually being
-    round (a circular cross-section, or a sphere) to extrapolate the far
-    side from the near one -- that's why GRASPABLE_CLASSES only lists round
-    objects; a box's hidden depth can't be recovered the same way from a
-    single view.
+    """Object (width_m, height_m, centroid, axes) from PCA on the isolated
+    point cloud. height_m/width_m are the largest/2nd-largest extent
+    (3rd dropped as unreliable "thickness" -- a single view never sees
+    behind the object), except for "cylinder"/"sphere" -- the only shapes
+    SHAPE_BY_CLASS produces -- where a circle/sphere fit
+    (_fit_cylinder_circle / _fit_sphere_center) replaces width_m/height_m
+    *and* centroid, correcting the same partial-view bias extent and
+    circle/sphere fits both handle for a round object; GRASPABLE_CLASSES
+    is round-objects-only for exactly this reason (a box's hidden depth
+    can't be recovered the same way from one view).
 
-    The third (smallest) PCA extent is always dropped as unreliable
-    "thickness": a single view never sees behind the object. Extents use
-    the 1st-99th percentile spread, not raw max-min, so one stray leftover
-    point (a table sliver, a flying-pixel bridge) can't inflate the result
-    -- kept deliberately gentle (vs. the 5th-95th _fit_cylinder_circle uses
-    for a different purpose) since sparse-but-real points are expected at
-    curved/specular ends (e.g. a bottle's cap).
-    Returns (0.0, 0.0, None, None) if too few points remain to fit axes."""
+    Extents use the 1st-99th percentile spread, not raw max-min, so a
+    stray leftover point can't inflate the result. Returns (0.0, 0.0,
+    None, None) if too few points remain to fit axes."""
     if point_cloud.shape[0] < 3:
         return 0.0, 0.0, None, None
     centroid = point_cloud.mean(axis=0)
@@ -725,8 +644,7 @@ def _object_dimensions(
 
 
 def _build_object_point_cloud(
-    depth_cam: DepthCamera, class_name: str, box: Box, num_frames: int = DEPTH_ACCUMULATION_FRAMES, 
-    show: bool = False,
+    depth_cam: DepthCamera, class_name: str, box: Box, num_frames: int = DEPTH_ACCUMULATION_FRAMES,
 ) -> Optional[reachy_grasp.ObjectGeometry]:
     """First pipeline step once an object is confirmed: crop to its (padded)
     bbox and fuse num_frames depth readings (median per pixel), backproject
@@ -767,12 +685,14 @@ def _build_object_point_cloud(
     print(f"Valid depth pixels: {valid_before:.0f}% (single frame) -> "
           f"{valid_after:.0f}% (after {num_frames}-frame fusion)")
 
-    # No diagnostic plot at this stage -- the printed point counts +
-    # table-normal verdict below cover it without popping up a window per
-    # object. reachy_grasp.show_grasp_plan is the only plot left: the final
-    # isolated point cloud together with the planned pre-grasp/grasp/lift
-    # poses, once plan_grasp has run.
+    # Diagnostic plots for the 4 pipeline stages are commented out below --
+    # not needed for normal runs (the printed counts + table normal verdict
+    # cover it), but handy for e.g. thesis figures. Uncomment to show.
+    # raw_cloud = _depth_crop_to_point_cloud(depth_cam, fused_crop, padded_box, correct_distortion=False)
+    # graphs.show_point_cloud(raw_cloud, f"{class_name} - 1 acquisita")
+
     point_cloud = _depth_crop_to_point_cloud(depth_cam, fused_crop, padded_box)
+    # graphs.show_point_cloud(point_cloud, f"{class_name} - 2 dopo rimozione distorsione")
 
     points_before_isolation = len(point_cloud)
     point_cloud = _remove_flying_pixels(point_cloud)
@@ -784,10 +704,12 @@ def _build_object_point_cloud(
               f"{tilt_deg:.0f} deg from vertical  [{verdict}]")
     else:
         print("Table normal: not fitted (too few points) -- reachy_grasp will fall back to a vertical assumption")
+    # graphs.show_point_cloud(point_cloud, f"{class_name} - 3 dopo isolamento background")
 
     point_cloud = _largest_cluster(point_cloud)
     print(f"Point cloud: {points_before_isolation} points (distortion-corrected) -> "
           f"{len(point_cloud)} (table + flying pixels removed, largest cluster kept)")
+    # graphs.show_point_cloud(point_cloud, f"{class_name} - 4 finale")
 
     shape = shape_from_class(class_name)
     width_m, height_m, centroid, axes = _object_dimensions(point_cloud, shape)
@@ -830,7 +752,7 @@ def _show_torso_camera(reachy: ReachySDK, model: YOLO, confidence: float) -> Non
                     print(f"[{class_name}] no feasible grasp (too wide for the gripper, "
                           "or its pose couldn't be estimated)")
                 else:
-                    reachy_grasp.show_grasp_plan(geometry, plan)
+                    graphs.show_grasp_plan(geometry, plan)
                     reachy_grasp.execute_grasp(reachy, plan)
                 _stream_torso_camera(depth_cam)
             break

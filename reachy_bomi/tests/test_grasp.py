@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Test script for the object selection + grasp planning pipeline -- with NO
-arm motion.
+Test script for the object selection + grasp planning + execution pipeline.
 
-Connects to Reachy, captures a frame, and runs the same hover-select/confirm
-flow as reachy_detection.py. Once an object is confirmed, its point cloud is
-built and reachy_grasp.plan_grasp computes pre-grasp/grasp/lift poses,
-plotted together with the point cloud via reachy_grasp.show_grasp_plan.
-
-The robot itself never moves: this script doesn't call reachy_grasp.execute_grasp.
+Connects to Reachy, sends both arms straight to the elbow_135 starting
+posture, then runs the same hover-select/confirm flow as
+reachy_detection.py. Once an object is confirmed, its point cloud is built,
+reachy_grasp.plan_grasp computes pre-grasp/grasp/lift poses (plotted via
+show_grasp_plan), and reachy_grasp.execute_grasp drives the arm through
+them for real.
 
 Usage:
     python3 test_grasp.py [robot_ip]
@@ -34,6 +33,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from reachy2_sdk import ReachySDK
 from ultralytics import YOLO
 
+import graphs
 import reachy_detection
 import reachy_grasp
 
@@ -71,50 +71,17 @@ def _test_grasp_planning(reachy: ReachySDK, model: YOLO, confidence: float) -> N
                     print(f"[{class_name}] no feasible grasp (too wide for the gripper, "
                           "or its pose couldn't be estimated)")
                 else:
-                    # Printed regardless of whether it's actually reachable,
-                    # so it can be pasted into a standalone
-                    # arm.goto()/inverse_kinematics() test -- separate from
-                    # this whole pipeline -- to check whether a rejection is
-                    # a real limit of Reachy's kinematics or a bug upstream.
-                    pregrasp_rounded = [[round(float(v), 6) for v in row] for row in plan.pregrasp_matrix.tolist()]
-                    print(f"[{class_name}] pregrasp target for {plan.arm_name}:")
-                    print(f"    pregrasp_matrix = np.array({pregrasp_rounded})")
+                    # Same matrix as pregrasp_matrix below, printed so it can
+                    # be pasted into tests/test_reachability.py to check a
+                    # rejection in isolation from the rest of the pipeline.
+                    rounded = [[round(float(v), 6) for v in row] for row in plan.pregrasp_matrix.tolist()]
+                    print(f"[{class_name}] pregrasp target for {plan.arm_name}: np.array({rounded})")
 
-                    reachy_grasp.show_grasp_plan(geometry, plan)
-                    # reachy_grasp.execute_grasp(reachy, plan)
-
-                    # Open -> pregrasp -> grasp -> lift, gripper left open
-                    # throughout (never closed) -- separate from
-                    # execute_grasp's own open->close->lift sequence, which
-                    # stays commented out above.
-                    arm = getattr(reachy, plan.arm_name, None)
-                    if arm is None or arm.gripper is None:
-                        print(f"[{class_name}] {plan.arm_name} or its gripper not available -- not moving")
-                    else:
-                        for name, matrix in (("pregrasp", plan.pregrasp_matrix),
-                                              ("grasp", plan.grasp_matrix),
-                                              ("lift", plan.lift_matrix)):
-                            try:
-                                arm.inverse_kinematics(matrix)
-                            except ValueError:
-                                print(f"[{class_name}] {name} pose unreachable for {plan.arm_name} -- not moving")
-                                break
-                        else:
-                            print(f"[{plan.arm_name}] opening gripper...")
-                            arm.gripper.open()
-                            print(f"[{plan.arm_name}] moving to pregrasp...")
-                            arm.goto(plan.pregrasp_matrix, duration=reachy_grasp.ARM_GOTO_DURATION_S, wait=True)
-                            print(f"[{plan.arm_name}] moving to grasp...")
-                            arm.goto(plan.grasp_matrix, duration=reachy_grasp.ARM_GOTO_DURATION_S,
-                                      interpolation_space="cartesian_space", wait=True)
-                            arm.gripper.close()
-                            print(f"[{plan.arm_name}] moving to lift...")
-                            arm.goto(plan.lift_matrix, duration=reachy_grasp.ARM_GOTO_DURATION_S, wait=True)
-                            print(f"[{plan.arm_name}] done -- gripper left open")
+                    graphs.show_grasp_plan(geometry, plan)
+                    reachy_grasp.execute_grasp(reachy, plan)
 
             # Re-capture before offering selection again -- building the
-            # point cloud takes real time, so the scene may well have
-            # changed since the frame this round started from.
+            # point cloud takes real time, so the scene may have changed.
             print("\n=== Re-capturing ===")
             captured = reachy_detection._capture_and_detect(depth_cam, model, confidence)
             if captured is None:
@@ -126,7 +93,7 @@ def _test_grasp_planning(reachy: ReachySDK, model: YOLO, confidence: float) -> N
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Test the object selection + grasp planning/plotting pipeline, without moving the robot."
+        description="Test the object selection + grasp planning/execution pipeline."
     )
     parser.add_argument("robot_ip", nargs="?", default=reachy_detection.DEFAULT_ROBOT_IP,
                         help=f"IP address of the Reachy robot (default: {reachy_detection.DEFAULT_ROBOT_IP})")
@@ -150,8 +117,7 @@ def main() -> None:
     reachy.turn_on()
 
     # Straight to elbow_135's final joint configuration, no intermediate
-    # "default" posture first (tests/elbow_135.py goes through "default" on
-    # the way there -- this skips that step).
+    # "default" posture first (unlike tests/elbow_135.py itself).
     for arm in (reachy.r_arm, reachy.l_arm):
         if arm is None or not arm.is_on():
             continue

@@ -60,6 +60,7 @@ from mediapipe.tasks.python.vision.core import vision_task_running_mode
 from reachy2_sdk import ReachySDK
 from ultralytics import YOLO
 
+import graphs
 import reachy_detection as grasp
 import reachy_grasp
 import bomi_teleop as teleop
@@ -271,7 +272,7 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
                     print(f"[{class_name}] no feasible grasp (too wide for the gripper, "
                           "or its pose couldn't be estimated)")
                 else:
-                    reachy_grasp.show_grasp_plan(geometry, plan)
+                    graphs.show_grasp_plan(geometry, plan)
                     reachy_grasp.execute_grasp(reachy, plan)
                 grasp._stream_torso_camera(depth_cam)
             break
