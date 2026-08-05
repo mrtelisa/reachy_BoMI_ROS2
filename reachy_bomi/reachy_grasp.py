@@ -46,6 +46,11 @@ DEFAULT_TABLE_NORMAL: npt.NDArray[np.float64] = np.array([0.0, 0.0, 1.0])
 # across the full circle around the object when searching for one IK accepts.
 APPROACH_CANDIDATE_COUNT = 16
 
+# Grasp height as a fraction of the object's height, measured from its
+# base (0 = bottom, 1 = top). 3/5 rather than the geometric middle -- e.g.
+# for a bottle, closer to its center of mass / where it's held by hand.
+GRASP_HEIGHT_FRACTION = 3 / 5
+
 
 class ObjectGeometry(NamedTuple):
     """Everything reachy_detection.py's point cloud pipeline knows about a
@@ -143,23 +148,36 @@ def _approach_candidates(
     return [default * np.cos(theta) + perp * np.sin(theta) for theta in np.linspace(0, 2 * np.pi, count, endpoint=False)]
 
 
-def _grasp_height_position(geometry: ObjectGeometry) -> npt.NDArray[np.float64]:
-    """geometry.centroid recentered along the object's long axis to the
-    middle of its observed height range, correcting for the density bias
-    of a partial view (a cylinder's cap has fewer points than its body, so
-    the raw mean skews low). Skip for "sphere": its centroid is already
-    the true fitted 3D center (reachy_detection._object_dimensions)."""
+def _grasp_height_position(
+    geometry: ObjectGeometry, table_normal: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    """geometry.centroid recentered along the object's long axis to
+    GRASP_HEIGHT_FRACTION of its observed height range, measured from the
+    base -- also correcting for the density bias of a partial view (a
+    cylinder's cap has fewer points than its body, so the raw mean skews
+    low). Skip for "sphere": its centroid is already the true fitted 3D
+    center (reachy_detection._object_dimensions).
+
+    PCA gives long_axis an arbitrary sign, so "base" isn't necessarily its
+    min end -- table_normal (already resolved to Reachy world "up",
+    defaulting when unfitted) picks out which end is which."""
     long_axis = geometry.axes[:, 0]
     offsets = (geometry.point_cloud - geometry.centroid) @ long_axis
-    mid_offset = (float(offsets.max()) + float(offsets.min())) / 2.0
-    return geometry.centroid + mid_offset * long_axis
+    base_offset, top_offset = (
+        (float(offsets.min()), float(offsets.max()))
+        if np.dot(long_axis, table_normal) >= 0
+        else (float(offsets.max()), float(offsets.min()))
+    )
+    target_offset = base_offset + GRASP_HEIGHT_FRACTION * (top_offset - base_offset)
+    return geometry.centroid + target_offset * long_axis
 
 
 def plan_grasp(reachy: ReachySDK, geometry: ObjectGeometry) -> Optional[GraspPlan]:
     """Pre-grasp + grasp + lift end-effector poses for `geometry`, or None
     if its pose couldn't be estimated or it's too wide for the gripper.
 
-    Approaches horizontally at the object's mid-height, gripper kept
+    Approaches horizontally at GRASP_HEIGHT_FRACTION of the object's
+    height, gripper kept
     "parallel to the table" (see _side_grasp_closing_axis) -- both
     "cylinder" and "sphere" are radially symmetric around a vertical axis,
     so any height/horizontal direction is an equally valid grasp. For each
@@ -178,7 +196,10 @@ def plan_grasp(reachy: ReachySDK, geometry: ObjectGeometry) -> Optional[GraspPla
     table_normal = geometry.table_normal if geometry.table_normal is not None else DEFAULT_TABLE_NORMAL
     table_normal = table_normal / np.linalg.norm(table_normal)
 
-    mid_position = geometry.centroid if geometry.shape == "sphere" else _grasp_height_position(geometry)
+    mid_position = (
+        geometry.centroid if geometry.shape == "sphere"
+        else _grasp_height_position(geometry, table_normal)
+    )
     radius = geometry.width_m / 2.0
 
     def _pregrasp_grasp_rotation_for(approach: npt.NDArray[np.float64]):
