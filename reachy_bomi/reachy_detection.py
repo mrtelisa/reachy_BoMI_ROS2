@@ -311,31 +311,8 @@ def _stream_torso_camera(depth_cam: DepthCamera) -> None:
 Capture = Tuple[np.ndarray, List[Detection], dict]
 
 
-def _filter_reachable_detections(
-    depth_cam: DepthCamera, depth_frame: np.ndarray, detections: List[Detection], reachy: ReachySDK,
-) -> List[Detection]:
-    """Keeps only detections whose center-pixel depth gives a 3D position
-    reachy_grasp.is_position_reachable finds an IK solution for on at least
-    one arm -- objects out of reach, or with no valid depth reading at their
-    box center, are dropped before a box is ever drawn for them."""
-    kept = []
-    for class_name, conf, box in detections:
-        x1, y1, x2, y2 = box
-        u, v = (x1 + x2) // 2, (y1 + y2) // 2
-        position = _estimate_object_position(depth_cam, depth_frame, u, v)
-        if position is not None and reachy_grasp.is_position_reachable(reachy, position):
-            kept.append((class_name, conf, box))
-    return kept
-
-
-def _capture_and_detect(
-    depth_cam: DepthCamera, model: YOLO, confidence: float, reachy: ReachySDK,
-) -> Optional[Capture]:
-    """Grab one RGB + depth frame and run YOLO once, returning the frame,
-    detections, and their labels. Detections are pre-filtered to those
-    reachy_grasp reports as within reach of some arm (see
-    _filter_reachable_detections) -- if depth isn't available at all, no
-    detection can be confirmed reachable, so none are kept."""
+def _capture_and_detect(depth_cam: DepthCamera, model: YOLO, confidence: float) -> Optional[Capture]:
+    """Grab one RGB + depth frame and run YOLO once, returning the frame, detections, and their labels."""
     result = depth_cam.get_frame(view=CameraView.LEFT)
     if result is None:
         print("[ERROR] Could not capture a frame from the camera")
@@ -346,7 +323,6 @@ def _capture_and_detect(
     depth_frame = depth_result[0] if depth_result is not None else None
 
     detections = _detect_graspable_objects(model, base_frame, confidence)
-    detections = _filter_reachable_detections(depth_cam, depth_frame, detections, reachy) if depth_frame is not None else []
 
     labels = {
         box: _label_for_detection(class_name, conf, box, depth_cam, depth_frame)
@@ -356,7 +332,7 @@ def _capture_and_detect(
 
 
 def _select_object_to_grasp(
-    depth_cam: DepthCamera, model: YOLO, confidence: float, captured: Capture, reachy: ReachySDK,
+    depth_cam: DepthCamera, model: YOLO, confidence: float, captured: Capture,
 ) -> Tuple[Optional[str], Optional[Box], Capture]:
     """Detect-and-hover loop on an already-captured frame. Returns the class name and its box
     once held green for HOVER_HOLD_SECONDS (or None, None if the user quit), plus the
@@ -379,7 +355,7 @@ def _select_object_to_grasp(
         elif button_hover_start is None:
             button_hover_start = now
         elif now - button_hover_start >= REFRESH_HOVER_SECONDS:
-            refreshed = _capture_and_detect(depth_cam, model, confidence, reachy)
+            refreshed = _capture_and_detect(depth_cam, model, confidence)
             if refreshed is not None:
                 base_frame, detections, labels = refreshed
             hovered_box, hover_start = None, None
@@ -832,12 +808,12 @@ def _show_torso_camera(reachy: ReachySDK, model: YOLO, confidence: float) -> Non
         print("[ERROR] No depth camera reported by the robot")
         return
 
-    captured = _capture_and_detect(depth_cam, model, confidence, reachy)
+    captured = _capture_and_detect(depth_cam, model, confidence)
     if captured is None:
         return
 
     while True:
-        class_name, box, captured = _select_object_to_grasp(depth_cam, model, confidence, captured, reachy)
+        class_name, box, captured = _select_object_to_grasp(depth_cam, model, confidence, captured)
         if class_name is None:
             break
 
