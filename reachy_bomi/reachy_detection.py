@@ -52,28 +52,23 @@ YOLO_CONFIDENCE = 0.5
 
 # Curated subset of COCO classes small/light enough for Reachy's gripper.
 GRASPABLE_CLASSES = {
-    "bottle", "cup", "wine glass", "bowl", "banana", "apple", "orange",
-    "sandwich", "cell phone", "remote", "scissors", "book", "spoon",
-    "fork", "knife", "teddy bear", "toothbrush", "mouse", "cake",
-    "hair drier", "vase", "book"
+    "bottle", "cup", "wine glass", "banana", "apple", "orange",
+    "spoon", "fork", "knife", "teddy bear", "toothbrush", "vase",
 }
 
-# Rough shape prior from the YOLO class, used by _object_dimensions to decide
-# whether to use the cylinder circle fit. Flat/rectangular items map to
-# "box"; blocky/roughly-cubic ones to "cube" (geometrically identical here,
-# kept distinct only for readability).
+# Rough shape prior from the YOLO class, used by _object_dimensions to pick
+# the circle (cylinder) or sphere fit that corrects for a single view only
+# ever seeing part of a round object. Only "cylinder"/"sphere" are
+# supported -- GRASPABLE_CLASSES is limited to round objects for exactly
+# this reason.
 SHAPE_BY_CLASS = {
-    "bottle": "cylinder", "cup": "cylinder", "wine glass": "cylinder", "vase": "cylinder",
-    "hair drier": "cylinder", "toothbrush": "cylinder",
-    "spoon": "cylinder", "fork": "cylinder", "knife": "cylinder", "banana": "cylinder",
-    "apple": "sphere", "orange": "sphere", "donut": "sphere",
-    "book": "box", "cell phone": "box", "remote": "box", "laptop": "box",
-    "keyboard": "box", "tv": "box", "sandwich": "box",
-    "mouse": "cube", "bowl": "cube", "cake": "cube", "teddy bear": "cube",
-    "scissors": "cube",
+    "bottle": "cylinder", "cup": "cylinder", "wine glass": "cylinder", 
+    "banana": "cylinder", "apple": "sphere", "orange": "sphere",
+    "spoon": "cylinder", "fork": "cylinder", "knife": "cylinder", 
+    "teddy bear": "cylinder", "toothbrush": "cylinder", "vase": "cylinder",
 }
-DEFAULT_SHAPE = "cylinder"
 
+DEFAULT_SHAPE = "cylinder"
 
 def shape_from_class(class_name: str) -> str:
     """Rough shape prior from the YOLO class name; defaults to cylinder for
@@ -706,19 +701,19 @@ def _object_dimensions(
     """Object (width_m, height_m, centroid, axes) from PCA on point_cloud's
     principal axes (already isolated to just the object -- see
     _remove_table_plane / _largest_cluster). height_m is the largest extent,
-    width_m the second-largest, except for round shapes -- "cylinder"
-    (bottle, cup, ...) and "sphere" (apple, orange, ...) -- where a
-    least-squares circle/sphere fit (_fit_cylinder_circle / _fit_sphere_center)
-    replaces both width_m/height_m *and* centroid: a single view only ever
-    sees the near-facing part of a round object, never the far side, so raw
-    PCA extent underestimates the true diameter, and the raw point mean
-    sits on that visible surface, offset from the true axis/center towards
-    the camera rather than at it. "box"/"cube" (book, mouse, ...) get
-    neither correction: unlike a circle or sphere, a box's hidden depth
-    can't be extrapolated from a single visible face without an assumption
-    we have no way to verify from one view, so their centroid stays
-    camera-biased -- a known, currently-unaddressed limitation, not an
-    oversight.
+    width_m the second-largest, except for "cylinder" (bottle, cup, ...) and
+    "sphere" (apple, orange, ...) -- the only two shapes SHAPE_BY_CLASS
+    produces -- where a least-squares circle/sphere fit
+    (_fit_cylinder_circle / _fit_sphere_center) replaces both
+    width_m/height_m *and* centroid: a single view only ever sees the
+    near-facing part of a round object, never the far side, so raw PCA
+    extent underestimates the true diameter, and the raw point mean sits on
+    that visible surface, offset from the true axis/center towards the
+    camera rather than at it. Both fits rely on the object actually being
+    round (a circular cross-section, or a sphere) to extrapolate the far
+    side from the near one -- that's why GRASPABLE_CLASSES only lists round
+    objects; a box's hidden depth can't be recovered the same way from a
+    single view.
 
     The third (smallest) PCA extent is always dropped as unreliable
     "thickness": a single view never sees behind the object. Extents use
