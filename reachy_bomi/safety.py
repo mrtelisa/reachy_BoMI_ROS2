@@ -154,7 +154,7 @@ def emergency_shutdown(reachy: ReachySDK, mobile_base=None, rotate_base_before_s
     print("\n[QUIT] ESC/Q pressed — stopping the robot and exiting.")
     try:
         safe_robot_shutdown(reachy, mobile_base, rotate_base_before_shutdown=rotate_base_before_shutdown)
-        reachy.disconnect()
+        reachy.turn_off()
         cv2.destroyAllWindows()
     finally:
         os._exit(0)

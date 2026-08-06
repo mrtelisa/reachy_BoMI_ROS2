@@ -330,3 +330,41 @@ def execute_grasp(reachy: ReachySDK, plan: GraspPlan, duration: float = ARM_GOTO
 
     print(f"[{plan.arm_name}] grasp sequence done")
     return True
+
+
+def place_back(reachy: ReachySDK, plan: GraspPlan, duration: float = ARM_GOTO_DURATION_S) -> bool:
+    """Reverses execute_grasp: moves plan.arm_name from lift back down to
+    plan.grasp_matrix (cartesian space, same vertical line as the lift leg
+    -- see plan_grasp), opens the gripper -- putting the object back down
+    exactly where it was picked up from -- then retreats back out to
+    plan.pregrasp_matrix (cartesian space again, same horizontal line as
+    execute_grasp's pregrasp -> grasp leg), so the gripper clears the
+    object along a straight line before any joint-space move (e.g. to an
+    elbow_135-style posture) that could otherwise sweep through it.
+    Returns False without moving if the arm/gripper isn't available or
+    either pose is unreachable from the arm's current joints."""
+    arm: Optional[Arm] = getattr(reachy, plan.arm_name)
+    if arm is None or arm.gripper is None:
+        print(f"[ERROR] {plan.arm_name} or its gripper is not available -- can't place back")
+        return False
+
+    for name, matrix in (("grasp", plan.grasp_matrix), ("pregrasp", plan.pregrasp_matrix)):
+        try:
+            arm.inverse_kinematics(matrix)
+        except ValueError:
+            print(f"[ERROR] {name} pose unreachable for {plan.arm_name} -- can't place back")
+            return False
+
+    try:
+        print(f"[{plan.arm_name}] placing back down...")
+        arm.goto(plan.grasp_matrix, duration=duration, interpolation_space="cartesian_space", wait=True)
+        print(f"[{plan.arm_name}] opening gripper...")
+        arm.gripper.open()
+        print(f"[{plan.arm_name}] retreating to pregrasp...")
+        arm.goto(plan.pregrasp_matrix, duration=duration, interpolation_space="cartesian_space", wait=True)
+    except RuntimeError as exc:
+        print(f"[ERROR] {plan.arm_name} place-back aborted: {exc}")
+        return False
+
+    print(f"[{plan.arm_name}] placed back down")
+    return True

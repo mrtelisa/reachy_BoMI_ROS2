@@ -9,7 +9,12 @@ Connects to Reachy, sends both arms straight to the elbow_135 starting
 posture, then hover-selects an object with the mouse and confirms it.
 Once confirmed, its point cloud is built, reachy_grasp.plan_grasp computes
 pre-grasp/grasp/lift poses (plotted via graphs.show_grasp_plan), and
-reachy_grasp.execute_grasp drives the arm through them for real.
+reachy_grasp.execute_grasp drives the arm through them for real. On a
+successful lift, _place_back_and_wind_down puts the object right back
+down where it was picked up, retracts to elbow_135, returns to the
+default posture, and powers off -- ending the run (see there for why,
+unlike a failed/skipped grasp, which re-captures and offers selection
+again).
 
 Usage:
     python3 test_grasp.py [robot_ip]
@@ -44,6 +49,19 @@ import safety
 # Same convention as tests/elbow_135.py.
 ELBOW_PITCH_DEG = -135.0
 ELBOW_MOVE_DURATION_S = 3.0
+
+
+def _goto_elbow_135(reachy: ReachySDK, duration: float = ELBOW_MOVE_DURATION_S) -> None:
+    """Sends both arms to the elbow_135 posture (elbow_90 base, pitch
+    overridden), blocking. Used both as the starting posture and, after a
+    successful grasp, to retract before winding down."""
+    for arm in (reachy.r_arm, reachy.l_arm):
+        if arm is None or not arm.is_on():
+            continue
+        joints = arm.get_default_posture_joints(common_posture="elbow_90")
+        joints[3] = ELBOW_PITCH_DEG
+        print(f"Moving {arm._part_id.name} to elbow_135 posture...")
+        arm.goto(joints, duration=duration, wait=True)
 
 
 def _select_object_to_grasp(
@@ -154,6 +172,29 @@ def _confirm_grasp(class_name: str) -> Optional[bool]:
             return None if quit_now else result
 
 
+def _place_back_and_wind_down(reachy: ReachySDK, plan: reachy_grasp.GraspPlan) -> None:
+    """Runs once, right after a successful grasp+lift: puts the object back
+    down exactly where it was picked up from and retreats to pregrasp
+    along a straight line (reachy_grasp.place_back), then retracts both
+    arms to elbow_135 (now a safe joint-space move since the gripper
+    already cleared the object), returns to the default posture, then
+    powers off """
+    reachy_grasp.place_back(reachy, plan)
+
+    print("\nRetracting both arms to the elbow_135 posture...")
+    _goto_elbow_135(reachy)
+
+    reachy.mobile_base.turn_on()
+    reachy.mobile_base.translate_by(x=-0.1, y=0.0, wait=True)
+    reachy.mobile_base.rotate_by(180.0, wait=True)
+
+    print("\nReturning to default posture...")
+    reachy.goto_posture("default", duration=3.0, wait=True)
+
+    print("\nPowering off...")
+    safety.safe_robot_shutdown(reachy)
+
+
 def _test_grasp_planning(reachy: ReachySDK, model: YOLO, confidence: float) -> None:
     depth_cam = reachy.cameras.depth
     if depth_cam is None:
@@ -190,7 +231,9 @@ def _test_grasp_planning(reachy: ReachySDK, model: YOLO, confidence: float) -> N
                     print(f"[{class_name}] pregrasp target for {plan.arm_name}: np.array({rounded})")
 
                     graphs.show_grasp_plan(geometry, plan)
-                    reachy_grasp.execute_grasp(reachy, plan)
+                    if reachy_grasp.execute_grasp(reachy, plan):
+                        _place_back_and_wind_down(reachy, plan)
+                        break
 
             # Re-capture before offering selection again -- building the
             # point cloud takes real time, so the scene may have changed.
@@ -236,13 +279,7 @@ def main() -> None:
 
     # Straight to elbow_135's final joint configuration, no intermediate
     # "default" posture first (unlike tests/elbow_135.py itself).
-    for arm in (reachy.r_arm, reachy.l_arm):
-        if arm is None or not arm.is_on():
-            continue
-        joints = arm.get_default_posture_joints(common_posture="elbow_90")
-        joints[3] = ELBOW_PITCH_DEG
-        print(f"Moving {arm._part_id.name} to elbow_135 starting posture...")
-        arm.goto(joints, duration=ELBOW_MOVE_DURATION_S, wait=True)
+    _goto_elbow_135(reachy)
 
     print(f"Loading YOLO model '{cli_args.yolo_model}'...")
     model = YOLO(cli_args.yolo_model)

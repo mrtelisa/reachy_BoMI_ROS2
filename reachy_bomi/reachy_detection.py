@@ -288,17 +288,19 @@ def _capture_and_detect(
             positions[box] = _estimate_object_position(depth_cam, depth_frame, u, v)
             widths[box] = _estimate_object_width(depth_cam, depth_frame, box)
 
-    if reachy is not None:
-        before = len(detections)
-        detections = [
-            detection for detection in detections
-            if positions.get(detection[2]) is not None
-            and widths.get(detection[2]) is not None
-            and widths[detection[2]] <= reachy_grasp.GRIPPER_MAX_OPENING_M
-            and reachy_grasp.is_roughly_reachable(reachy, positions[detection[2]])
-        ]
-        print(f"Reachability pre-filter: {before} detected -> {len(detections)} "
-              f"plausibly reachable and gripper-sized")
+    # Reachability/gripper-size pre-filter -- commented out for now, kept
+    # (not deleted) for when it's needed again.
+    # if reachy is not None:
+    #     before = len(detections)
+    #     detections = [
+    #         detection for detection in detections
+    #         if positions.get(detection[2]) is not None
+    #         and widths.get(detection[2]) is not None
+    #         and widths[detection[2]] <= reachy_grasp.GRIPPER_MAX_OPENING_M
+    #         and reachy_grasp.is_roughly_reachable(reachy, positions[detection[2]])
+    #     ]
+    #     print(f"Reachability pre-filter: {before} detected -> {len(detections)} "
+    #           f"plausibly reachable and gripper-sized")
 
     labels = {
         box: _label_for_detection(class_name, conf, positions.get(box))

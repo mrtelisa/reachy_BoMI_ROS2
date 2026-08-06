@@ -53,7 +53,14 @@ Phase 3.5 - Pre-grasping pose (opened from Control):
 Phase 4 - Object selection / grasp (opened from Control):
     Same capture -> hover-to-select -> Yes/No confirm flow as reachy_detection.py,
     and every hover point is the BoMI cursor (mapped into that window's pixel
-    space). Answering "No" or quitting (Q/ESC/X) returns to Control.
+    space). Answering "No" re-offers hover-select on a fresh capture;
+    quitting (Q/ESC/X) or a successful grasp both end the run for good --
+    Control never resumes (see _teleop_with_grasp_switch's "one-way switch"
+    comment). On a successful lift, _place_back_and_wind_down puts the
+    object right back down where it was picked up, retracts both arms to
+    the pre-grasping posture, rotates the base 180 deg (table no longer in
+    front of it), returns to the default posture, then main()'s finally
+    block powers everything off.
 """
 
 import argparse
@@ -324,7 +331,7 @@ def _confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, 
 
 
 def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, reachy, crs_x, crs_y,
-                     robot_ip):
+                     robot_ip, mobile_base):
     """BoMI-driven equivalent of tests/test_grasp.py's _test_grasp_planning:
     capture -> hover-select -> confirm, looping back on "No" until an object is
     confirmed (then builds its point cloud, streams the live feed as a
@@ -364,7 +371,8 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
                               "or its pose couldn't be estimated)")
                     else:
                         graphs.show_grasp_plan(geometry, plan)
-                        reachy_grasp.execute_grasp(reachy, plan)
+                        if reachy_grasp.execute_grasp(reachy, plan):
+                            _place_back_and_wind_down(reachy, mobile_base, plan)
                 break
             # No -> back to the same captured frame/detections, all blue again
 
@@ -388,6 +396,36 @@ def _goto_pre_grasp_pose(reachy, duration: float = PRE_GRASP_MOVE_DURATION) -> l
         joints[3] = PRE_GRASP_ELBOW_PITCH_DEG
         goto_ids.append(arm.goto(joints, duration=duration, wait=False))
     return goto_ids
+
+
+def _place_back_and_wind_down(reachy, mobile_base, plan: reachy_grasp.GraspPlan) -> None:
+    """Runs once, right after a successful grasp+lift: puts the object back
+    down exactly where it was picked up from and retreats to pregrasp
+    along a straight line (reachy_grasp.place_back), then retracts both
+    arms to the pre-grasping elbow_135 posture (now a safe joint-space move
+    since the gripper already cleared the object), rotates the base
+    safety.SHUTDOWN_ROTATION_DEG so whatever was in front of it (the
+    table) ends up behind it instead, then returns to the default posture
+    -- leaving the robot in a safe, predictable state for main()'s finally
+    block (see _in_grasp_phase) to power off from."""
+    reachy_grasp.place_back(reachy, plan)
+
+    print(f"\nRetracting both arms to the pre-grasping posture "
+          f"(elbow pitch {PRE_GRASP_ELBOW_PITCH_DEG:.0f} deg)...")
+    goto_ids = _goto_pre_grasp_pose(reachy)
+    while not all(reachy.is_goto_finished(goto_id) for goto_id in goto_ids):
+        time.sleep(0.1)
+
+    print(f"\nRotating the base {safety.SHUTDOWN_ROTATION_DEG:.0f} deg...")
+    try:
+        mobile_base.turn_on()
+        mobile_base.translate_by(x=-0.1, y=0.0, wait=True)
+        mobile_base.rotate_by(safety.SHUTDOWN_ROTATION_DEG, wait=True)
+    except Exception as exc:
+        print(f"[WARN] Could not rotate the base ({exc}).")
+
+    print("\nReturning to default posture...")
+    reachy.goto_posture("default", duration=3.0, wait=True)
 
 
 def _draw_wait_canvas(progress: float) -> np.ndarray:
@@ -534,7 +572,7 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
             _stop_camera_viewer("head")
             _run_grasp_mode(
                 cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, reachy, crs_x, crs_y,
-                robot_ip,
+                robot_ip, mobile_base,
             )
             break
 
