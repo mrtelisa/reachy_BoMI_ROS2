@@ -396,9 +396,9 @@ def _draw_wait_canvas(progress: float) -> np.ndarray:
     already-open, busy camera feed is too easy to miss, so this pops up as
     a separate window instead, like reachy_detection's confirm dialog."""
     canvas = np.full((WAIT_CANVAS_HEIGHT, WAIT_CANVAS_WIDTH, 3), 30, dtype=np.uint8)
-    cv2.putText(canvas, "Waiting that the robot",
+    cv2.putText(canvas, "Waiting for the robot",
                 (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
-    cv2.putText(canvas, "has finished its movement",
+    cv2.putText(canvas, "to finished its movement",
                 (30, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
 
     bar_x1, bar_y1, bar_x2, bar_y2 = 30, 160, WAIT_CANVAS_WIDTH - 30, 190
