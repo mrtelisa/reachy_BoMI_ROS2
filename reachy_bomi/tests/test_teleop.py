@@ -361,20 +361,26 @@ def _calibration_phase(cap, landmarker) -> list:
     return samples
 
 
-def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap) -> None:
+def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, hold_seconds: float = 5.0) -> None:
     """
     Shows the same cursor/region view as the control phase, but no velocity
     is computed or logged. Lets the user get a feel for the cursor and see
     where it starts out before control begins.
+
+    Advances to Control once the cursor dwells in region 5 (center) for
+    hold_seconds straight -- KEEP IN SYNC with bomi_teleop.
+    _cursor_preview_phase's own default, not a keypress.
     """
     cursor_filter = CursorFilter()
     map_window = MAP_WINDOW_NAME
 
     crs_x, crs_y = BASE_WIDTH / 2.0, BASE_HEIGHT / 2.0
     region = check_region_cursor(crs_x, crs_y)
+    center_hold_start = None
 
     print("\n=== CURSOR PREVIEW (nothing computed/logged yet) ===")
-    print("Get a feel for the cursor. ENTER = start Control   |   Q = quit")
+    print(f"Get a feel for the cursor. Hold it centered (region 5) for {hold_seconds:.0f}s "
+          "to start Control   |   Q = quit")
 
     while True:
         ret, frame = cap.read()
@@ -385,7 +391,8 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap) -> None:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         results = landmarker.detect_for_video(mp_image, int(time.time() * 1000))
 
-        if results.hand_landmarks:
+        hand_detected = bool(results.hand_landmarks)
+        if hand_detected:
             hl = results.hand_landmarks[0]
             _draw_hand_landmarks(frame, hl)
             mirror_x = results.handedness[0][0].category_name == "Right"
@@ -393,10 +400,16 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap) -> None:
             crs_x, crs_y = cursor_filter.update(crs_x, crs_y)
             region = check_region_cursor(crs_x, crs_y)
 
-        cv2.imshow(map_window, _draw_cursor_map(crs_x, crs_y, region, "(preview - not computed)"))
+        now = time.time()
+        center_hold_start = (center_hold_start or now) if (hand_detected and region == 5) else None
+        center_progress = min((now - center_hold_start) / hold_seconds, 1.0) if center_hold_start else 0.0
+
+        cv2.imshow(map_window, _draw_cursor_map(
+            crs_x, crs_y, region, f"(preview - not computed, hold centered: {center_progress * 100:.0f}%)",
+        ))
 
         key = cv2.waitKey(1) & 0xFF
-        if key == 13:  # ENTER
+        if center_progress >= 1.0:
             break
         if _quit_requested(key, map_window):
             print("Aborted.")

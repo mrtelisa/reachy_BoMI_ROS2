@@ -40,9 +40,10 @@ Phase 3.5 - Pre-grasping pose (opened from Control):
     Both arms move to a pre-grasping posture (elbows bent to about
     PRE_GRASP_ELBOW_PITCH_DEG degrees) the base is held at zero
     speed. Once the arms are in place, the cursor/9-region map reappears
-    (same as Control) but sends no speed commands; ENTER resumes Control
-    with linear/angular velocities halved. Hold the cursor centered (region
-    5) for another SELECTION_HOLD_SECONDS straight to stop the base and open
+    (same as Control) but sends no speed commands; holding the cursor
+    centered (region 5) for SELECTION_HOLD_SECONDS straight resumes Control
+    with linear/angular velocities halved. Hold it centered for another
+    SELECTION_HOLD_SECONDS straight from there to stop the base and open
     object selection.
 
 Phase 4 - Object selection / grasp (opened from Control):
@@ -462,7 +463,7 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
 
             crs_x, crs_y = teleop._cursor_preview_phase(
                 cap, landmarker, bomi_map, cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y, show_cam=False,
-                on_frame=lambda: _show_torso_frame(depth_cam),
+                on_frame=lambda: _show_torso_frame(depth_cam), hold_seconds=SELECTION_HOLD_SECONDS,
             )
 
             pre_grasp_reached = True
@@ -590,7 +591,7 @@ def main() -> None:
         cursor_filter = teleop.CursorFilter()
         crs_x, crs_y = teleop._cursor_preview_phase(
             cap, landmarker, bomi_map, cursor_filter=cursor_filter, show_cam=False,
-            on_frame=lambda: _show_torso_frame(depth_cam),
+            on_frame=lambda: _show_torso_frame(depth_cam), hold_seconds=SELECTION_HOLD_SECONDS,
         )
         _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, model, cli_args.conf, reachy,
                                    cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y)

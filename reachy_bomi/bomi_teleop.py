@@ -49,9 +49,9 @@ BASE_HEIGHT = 1500
 # their own resistance and simply don't move -- so once a component leaves
 # its dead zone it ramps from min_* (at the dead-zone edge) straight to
 # max_* (at the screen edge), not from 0.
-MIN_LINEAR = 0.18      # m/s
+MIN_LINEAR = 0.15      # m/s
 MAX_LINEAR = 0.5      # m/s
-MIN_ANGULAR = 0.67     # rad/s
+MIN_ANGULAR = 0.6     # rad/s
 MAX_ANGULAR = 1.1     # rad/s
 DEAD_ZONE_PX = 200    # pixel radius around screen center before motion starts
 
@@ -353,11 +353,17 @@ def _calibration_phase(cap, landmarker) -> list:
 
 def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: CursorFilter = None,
                            crs_x: float = None, crs_y: float = None, show_cam: bool = True,
-                           on_frame=None) -> tuple:
+                           on_frame=None, hold_seconds: float = 5.0) -> tuple:
     """
     Shows the same cursor/region view as the control phase, but never talks to
     the robot. Lets the user get a feel for the cursor and see where it starts
     out before enabling motion.
+
+    Advances to Control once the cursor dwells in region 5 (center) for
+    hold_seconds straight, same dwell mechanism (accrue while centered,
+    reset otherwise) as reachy_control.py's own SELECTION_HOLD_SECONDS
+    switches and the button hovers in reachy_detection.py's confirm/refresh
+    UI -- not a keypress.
 
     Pass an existing cursor_filter/crs_x/crs_y to continue them (no filter
     reset) instead of starting fresh; returns the final (crs_x, crs_y).
@@ -375,9 +381,11 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: Cur
     if crs_x is None or crs_y is None:
         crs_x, crs_y = BASE_WIDTH / 2.0, BASE_HEIGHT / 2.0
     region = check_region_cursor(crs_x, crs_y)
+    center_hold_start = None
 
     print("\n=== CURSOR PREVIEW (robot not moving) ===")
-    print("Get a feel for the cursor. ENTER = start Control   |   Q = quit")
+    print(f"Get a feel for the cursor. Hold it centered (region 5) for {hold_seconds:.0f}s "
+          "to start Control   |   Q = quit")
 
     while True:
         ret, frame = cap.read()
@@ -388,7 +396,8 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: Cur
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         results = landmarker.detect_for_video(mp_image, int(time.time() * 1000))
 
-        if results.hand_landmarks:
+        hand_detected = bool(results.hand_landmarks)
+        if hand_detected:
             hl = results.hand_landmarks[0]
             _draw_hand_landmarks(frame, hl)
             mirror_x = results.handedness[0][0].category_name == "Right"
@@ -396,12 +405,19 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: Cur
             crs_x, crs_y = cursor_filter.update(crs_x, crs_y)
             region = check_region_cursor(crs_x, crs_y)
 
+        now = time.time()
+        # Only accrue while actively tracked and centered, so a dropped
+        # hand while the stale cursor happens to sit in region 5 can't
+        # silently trigger the switch.
+        center_hold_start = (center_hold_start or now) if (hand_detected and region == 5) else None
+        center_progress = min((now - center_hold_start) / hold_seconds, 1.0) if center_hold_start else 0.0
+
         cv2.putText(
             frame, f"region={region}  cursor=({crs_x:.0f},{crs_y:.0f})",
             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
         )
         cv2.putText(
-            frame, "PREVIEW - robot not moving. ENTER=start control  Q=quit",
+            frame, f"PREVIEW - robot not moving. Hold centered: {center_progress * 100:.0f}%  Q=quit",
             (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2,
         )
 
@@ -412,7 +428,7 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: Cur
             on_frame()
 
         key = cv2.waitKey(1) & 0xFF
-        if key == 13:  # ENTER
+        if center_progress >= 1.0:
             break
         if (show_cam and safety.quit_requested(key, cam_window)) or safety.quit_requested(key, map_window):
             print("Aborted.")

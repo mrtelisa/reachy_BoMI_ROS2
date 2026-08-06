@@ -68,9 +68,9 @@ BASE_HEIGHT = 1500
 
 # KEEP IN SYNC with bomi_teleop.py's MIN_LINEAR/MAX_LINEAR/MIN_ANGULAR/MAX_ANGULAR
 # (the real values reachy_control.py uses)
-MIN_LINEAR = 0.18      # m/s
+MIN_LINEAR = 0.15      # m/s
 MAX_LINEAR = 0.5      # m/s
-MIN_ANGULAR = 0.67     # rad/s
+MIN_ANGULAR = 0.6     # rad/s
 MAX_ANGULAR = 1.1     # rad/s
 DEAD_ZONE_PX = 200    # pixel radius around screen center before motion starts
 
@@ -403,15 +403,21 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: Cur
     """Same cursor/region view as Control, but nothing is computed/logged
     yet. Lets the user get a feel for the cursor before Control begins.
 
+    Advances to Control once the cursor dwells in region 5 (center) for
+    SELECTION_HOLD_SECONDS straight, same dwell mechanism as _control_phase's
+    own switches -- not a keypress.
+
     Pass an existing cursor_filter/crs_x/crs_y to continue them (no filter
     reset) instead of starting fresh; returns the final (crs_x, crs_y)."""
     cursor_filter = cursor_filter or CursorFilter()
     if crs_x is None or crs_y is None:
         crs_x, crs_y = BASE_WIDTH / 2.0, BASE_HEIGHT / 2.0
     region = check_region_cursor(crs_x, crs_y)
+    center_hold_start = None
 
     print("\n=== CURSOR PREVIEW (nothing computed/logged yet) ===")
-    print("Get a feel for the cursor. ENTER = start Control   |   Q = quit")
+    print(f"Get a feel for the cursor. Hold it centered (region 5) for {SELECTION_HOLD_SECONDS:.0f}s "
+          "to start Control   |   Q = quit")
 
     while True:
         frame, crs_x, crs_y, hand_detected = _update_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
@@ -420,15 +426,18 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: Cur
         if hand_detected:
             region = check_region_cursor(crs_x, crs_y)
 
-        cv2.putText(frame, f"region={region}  cursor=({crs_x:.0f},{crs_y:.0f})",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, "PREVIEW - nothing logged. ENTER=start control  Q=quit",
-                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        now = time.time()
+        center_hold_start = (center_hold_start or now) if (hand_detected and region == 5) else None
+        center_progress = (
+            min((now - center_hold_start) / SELECTION_HOLD_SECONDS, 1.0) if center_hold_start else 0.0
+        )
 
-        cv2.imshow(MAP_WINDOW_NAME, _draw_cursor_map(crs_x, crs_y, region, "(preview - not computed)"))
+        cv2.imshow(MAP_WINDOW_NAME, _draw_cursor_map(
+            crs_x, crs_y, region, f"(preview - not computed, hold centered: {center_progress * 100:.0f}%)",
+        ))
 
         key = cv2.waitKey(1) & 0xFF
-        if key == 13:  # ENTER
+        if center_progress >= 1.0:
             break
         if _quit_requested(key, MAP_WINDOW_NAME):
             print("Aborted.")
