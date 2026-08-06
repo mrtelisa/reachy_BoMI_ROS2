@@ -169,7 +169,7 @@ def _show_torso_frame(depth_cam) -> None:
 
 def _select_object_to_grasp_bomi(
     cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
-    depth_cam, model, confidence, captured,
+    depth_cam, model, confidence, captured, reachy,
 ):
     """Same hover-to-select/hover-Refresh loop as tests/test_grasp.py's
     _select_object_to_grasp, but the hover point is the BoMI cursor mapped
@@ -196,7 +196,7 @@ def _select_object_to_grasp_bomi(
         elif button_hover_start is None:
             button_hover_start = now
         elif now - button_hover_start >= grasp.REFRESH_HOVER_SECONDS:
-            refreshed = grasp._capture_and_detect(depth_cam, model, confidence)
+            refreshed = grasp._capture_and_detect(depth_cam, model, confidence, reachy=reachy)
             if refreshed is not None:
                 base_frame, detections, labels = refreshed
                 frame_h, frame_w = base_frame.shape[:2]
@@ -282,14 +282,14 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
     capture -> hover-select -> confirm, looping back on "No" until an object is
     confirmed (then builds its point cloud, streams the live feed as a
     checkpoint, then plans and executes the grasp) or the user quits."""
-    captured = grasp._capture_and_detect(depth_cam, model, confidence)
+    captured = grasp._capture_and_detect(depth_cam, model, confidence, reachy=reachy)
     if captured is None:
         return crs_x, crs_y
 
     while True:
         class_name, box, captured, crs_x, crs_y = _select_object_to_grasp_bomi(
             cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
-            depth_cam, model, confidence, captured,
+            depth_cam, model, confidence, captured, reachy,
         )
         if class_name is None:
             break

@@ -51,6 +51,11 @@ APPROACH_CANDIDATE_COUNT = 16
 # for a bottle, closer to its center of mass / where it's held by hand.
 GRASP_HEIGHT_FRACTION = 3 / 5
 
+# How many horizontal approach directions is_roughly_reachable tries --
+# fewer than APPROACH_CANDIDATE_COUNT since it runs per detection, before
+# the user has even picked one, and only needs a yes/no, not the best line.
+QUICK_REACHABILITY_CANDIDATE_COUNT = 8
+
 
 class ObjectGeometry(NamedTuple):
     """Everything reachy_detection.py's point cloud pipeline knows about a
@@ -146,6 +151,39 @@ def _approach_candidates(
     perp /= np.linalg.norm(perp)
 
     return [default * np.cos(theta) + perp * np.sin(theta) for theta in np.linspace(0, 2 * np.pi, count, endpoint=False)]
+
+
+def is_roughly_reachable(
+    reachy: ReachySDK, position: npt.NDArray[np.float64], count: int = QUICK_REACHABILITY_CANDIDATE_COUNT,
+) -> bool:
+    """Cheap reachability pre-filter for a single 3D point -- e.g. a
+    detection's single-pixel depth estimate (reachy_detection.
+    _estimate_object_position), available immediately at capture time,
+    well before an object is confirmed and its full point cloud (10-frame
+    depth fusion, several seconds, one network round-trip per frame) gets
+    built. Ignores the object's actual radius/orientation (unknown at
+    this stage) and checks only the pregrasp position, not grasp too --
+    a coarse "is this worth showing a box for", not a committed plan
+    (that's plan_grasp, once the point cloud exists and execute_grasp is
+    about to run for real). True if IK accepts a horizontal-approach
+    pregrasp pose, from either arm, for at least one of `count` candidate
+    directions."""
+    near_side = "r_arm" if position[1] < 0 else "l_arm"
+    far_side = "l_arm" if near_side == "r_arm" else "r_arm"
+
+    for arm_name in (near_side, far_side):
+        arm = getattr(reachy, arm_name, None)
+        if arm is None:
+            continue
+        for approach in _approach_candidates(position, DEFAULT_TABLE_NORMAL, count=count):
+            pregrasp_position = position - approach * PREGRASP_STANDOFF_M
+            rotation = _orientation_from_approach(approach, _side_grasp_closing_axis(approach, DEFAULT_TABLE_NORMAL))
+            try:
+                arm.inverse_kinematics(_pose_matrix(rotation, pregrasp_position))
+                return True
+            except ValueError:
+                continue
+    return False
 
 
 def _grasp_height_position(

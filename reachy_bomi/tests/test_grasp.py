@@ -47,7 +47,7 @@ ELBOW_MOVE_DURATION_S = 3.0
 
 
 def _select_object_to_grasp(
-    depth_cam, model: YOLO, confidence: float, captured: "reachy_detection.Capture",
+    depth_cam, model: YOLO, confidence: float, captured: "reachy_detection.Capture", reachy: ReachySDK,
 ) -> Tuple[Optional[str], Optional["reachy_detection.Box"], "reachy_detection.Capture"]:
     """Mouse-driven equivalent of reachy_control._select_object_to_grasp_bomi
     (which hovers with the BoMI cursor instead) -- detect-and-hover loop on
@@ -72,7 +72,7 @@ def _select_object_to_grasp(
         elif button_hover_start is None:
             button_hover_start = now
         elif now - button_hover_start >= reachy_detection.REFRESH_HOVER_SECONDS:
-            refreshed = reachy_detection._capture_and_detect(depth_cam, model, confidence)
+            refreshed = reachy_detection._capture_and_detect(depth_cam, model, confidence, reachy=reachy)
             if refreshed is not None:
                 base_frame, detections, labels = refreshed
             hovered_box, hover_start = None, None
@@ -161,12 +161,12 @@ def _test_grasp_planning(reachy: ReachySDK, model: YOLO, confidence: float) -> N
         return
 
     print("\n=== Capturing frame ===")
-    captured = reachy_detection._capture_and_detect(depth_cam, model, confidence)
+    captured = reachy_detection._capture_and_detect(depth_cam, model, confidence, reachy=reachy)
     if captured is None:
         return
 
     while True:
-        class_name, box, captured = _select_object_to_grasp(depth_cam, model, confidence, captured)
+        class_name, box, captured = _select_object_to_grasp(depth_cam, model, confidence, captured, reachy)
         if class_name is None:
             break
 
@@ -195,7 +195,7 @@ def _test_grasp_planning(reachy: ReachySDK, model: YOLO, confidence: float) -> N
             # Re-capture before offering selection again -- building the
             # point cloud takes real time, so the scene may have changed.
             print("\n=== Re-capturing ===")
-            captured = reachy_detection._capture_and_detect(depth_cam, model, confidence)
+            captured = reachy_detection._capture_and_detect(depth_cam, model, confidence, reachy=reachy)
             if captured is None:
                 break
         # "No" -> same, back to hover-select

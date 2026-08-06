@@ -21,6 +21,7 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 import open3d as o3d
+from reachy2_sdk import ReachySDK
 from reachy2_sdk.media.camera import CameraView, DepthCamera
 from reachy2_sdk.utils.utils import invert_affine_transformation_matrix
 from ultralytics import YOLO
@@ -170,19 +171,32 @@ def _estimate_object_position(
     return depth_cam.pixel_to_world(u, v, z_c=depth_mm / 1000.0, view=CameraView.LEFT)
 
 
-def _label_for_detection(
-    class_name: str, conf: float, box: Box,
-    depth_cam: DepthCamera, depth_frame: Optional[np.ndarray],
-) -> str:
+def _estimate_object_width(
+    depth_cam: DepthCamera, depth_frame: np.ndarray, box: Box,
+) -> Optional[float]:
+    """Cheap real-world width estimate (meters), backprojecting the box's
+    left/right edges at vertical-center height and taking their distance --
+    rougher than the point-cloud-based width_m (_object_dimensions: PCA +
+    circle/sphere fit correcting for viewing angle and partial-view bias),
+    since it assumes near-constant depth across the box and a head-on view,
+    but only needs to catch "obviously too wide for the gripper" before the
+    user selects it, not the true width. YOLO boxes run a little loose
+    around round objects, so this tends to overestimate if anything --
+    erring toward hiding a borderline object rather than showing one that
+    turns out too wide only after the point cloud is built."""
+    x1, y1, x2, y2 = box
+    v = (y1 + y2) // 2
+    left = _estimate_object_position(depth_cam, depth_frame, x1, v)
+    right = _estimate_object_position(depth_cam, depth_frame, x2, v)
+    if left is None or right is None:
+        return None
+    return float(np.linalg.norm(right - left))
+
+
+def _label_for_detection(class_name: str, conf: float, position: Optional[np.ndarray]) -> str:
     label = f"{class_name} {conf:.2f}"
-
-    if depth_frame is not None:
-        x1, y1, x2, y2 = box
-        u, v = (x1 + x2) // 2, (y1 + y2) // 2
-        position = _estimate_object_position(depth_cam, depth_frame, u, v)
-        if position is not None:
-            label += f"  xyz=({position[0]:.2f},{position[1]:.2f},{position[2]:.2f})m"
-
+    if position is not None:
+        label += f"  xyz=({position[0]:.2f},{position[1]:.2f},{position[2]:.2f})m"
     return label
 
 
@@ -245,8 +259,21 @@ def _stream_torso_camera(depth_cam: DepthCamera) -> None:
 Capture = Tuple[np.ndarray, List[Detection], dict]
 
 
-def _capture_and_detect(depth_cam: DepthCamera, model: YOLO, confidence: float) -> Optional[Capture]:
-    """Grab one RGB + depth frame and run YOLO once, returning the frame, detections, and their labels."""
+def _capture_and_detect(
+    depth_cam: DepthCamera, model: YOLO, confidence: float, reachy: Optional[ReachySDK] = None,
+) -> Optional[Capture]:
+    """Grab one RGB + depth frame and run YOLO once, returning the frame,
+    detections, and their labels.
+
+    If reachy is given, detections are pre-filtered down to the ones that
+    are both a plausible gripper fit (_estimate_object_width <=
+    reachy_grasp.GRIPPER_MAX_OPENING_M) and reachy_grasp.is_roughly_reachable
+    from their single-pixel depth position -- objects the robot has no
+    plausible line to, or clearly can't close the gripper around, never get
+    a box drawn or become selectable in the first place, instead of the
+    user finding out only after confirming and building the full point
+    cloud. reachy=None (e.g. tests/test_object_dimensions.py, which wants
+    every detection regardless) skips this entirely."""
     result = depth_cam.get_frame(view=CameraView.LEFT)
     if result is None:
         print("[ERROR] Could not capture a frame from the camera")
@@ -258,8 +285,29 @@ def _capture_and_detect(depth_cam: DepthCamera, model: YOLO, confidence: float) 
 
     detections = _detect_graspable_objects(model, base_frame, confidence)
 
+    positions = {}
+    widths = {}
+    if depth_frame is not None:
+        for _class_name, _conf, box in detections:
+            x1, y1, x2, y2 = box
+            u, v = (x1 + x2) // 2, (y1 + y2) // 2
+            positions[box] = _estimate_object_position(depth_cam, depth_frame, u, v)
+            widths[box] = _estimate_object_width(depth_cam, depth_frame, box)
+
+    if reachy is not None:
+        before = len(detections)
+        detections = [
+            detection for detection in detections
+            if positions.get(detection[2]) is not None
+            and widths.get(detection[2]) is not None
+            and widths[detection[2]] <= reachy_grasp.GRIPPER_MAX_OPENING_M
+            and reachy_grasp.is_roughly_reachable(reachy, positions[detection[2]])
+        ]
+        print(f"Reachability pre-filter: {before} detected -> {len(detections)} "
+              f"plausibly reachable and gripper-sized")
+
     labels = {
-        box: _label_for_detection(class_name, conf, box, depth_cam, depth_frame)
+        box: _label_for_detection(class_name, conf, positions.get(box))
         for class_name, conf, box in detections
     }
     return base_frame, detections, labels
