@@ -75,7 +75,7 @@ import stream
 import bomi_teleop as teleop
 
 # Placeholder — replace with the robot's actual IP.
-DEFAULT_ROBOT_IP = "192.168.0.104"
+DEFAULT_ROBOT_IP = "192.168.0.121"
 
 # How long the cursor must stay in region 5 (dead-zone center) before Control
 # moves to the next step: first into the pre-grasping pose, then (once there)
@@ -550,6 +550,8 @@ def main() -> None:
 
     reachy.turn_on()
     reachy.goto_posture("default", duration=3.0, wait=True)
+    reachy.r_arm.gripper.open()
+    reachy.l_arm.gripper.open()
     mobile_base.lidar.safety_enabled = True
     mobile_base.lidar.safety_slowdown_distance = teleop.LIDAR_SLOWDOWN_DISTANCE
     mobile_base.lidar.safety_critical_distance = teleop.LIDAR_CRITICAL_DISTANCE
