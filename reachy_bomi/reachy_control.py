@@ -160,6 +160,14 @@ def _bring_window_to_front(window_name: str) -> None:
     cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
 
 
+# True for the duration of _run_grasp_mode (object selection/grasping) --
+# tracked here, not threaded through every shutdown path, so
+# _on_emergency_quit/main()'s finally block always know whether the robot
+# might be sitting close to a table with its arms about to fold in (see
+# safety.safe_robot_shutdown's rotate_base_before_shutdown), however deep
+# in the call stack the quit was triggered from.
+_in_grasp_phase = False
+
 # Camera-viewer subprocesses (tests/camera_viewer.py), keyed by "head"/
 # "torso" -- tracked here rather than threaded through every function that
 # might need to stop one, so _on_emergency_quit/the finally block in
@@ -321,44 +329,49 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
     capture -> hover-select -> confirm, looping back on "No" until an object is
     confirmed (then builds its point cloud, streams the live feed as a
     checkpoint, then plans and executes the grasp) or the user quits."""
-    captured = grasp._capture_and_detect(depth_cam, model, confidence, reachy=reachy)
-    if captured is None:
+    global _in_grasp_phase
+    _in_grasp_phase = True
+    try:
+        captured = grasp._capture_and_detect(depth_cam, model, confidence, reachy=reachy)
+        if captured is None:
+            return crs_x, crs_y
+
+        while True:
+            class_name, box, captured, crs_x, crs_y = _select_object_to_grasp_bomi(
+                cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
+                depth_cam, model, confidence, captured, reachy,
+            )
+            if class_name is None:
+                break
+
+            decision, crs_x, crs_y = _confirm_grasp_bomi(
+                cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, class_name,
+            )
+            if decision is None:
+                break
+            if decision:
+                geometry = grasp._build_object_point_cloud(depth_cam, class_name, box)
+                if geometry is not None:
+                    print(f"[{class_name}] estimated width={geometry.width_m * 100:.1f}cm  "
+                          f"height={geometry.height_m * 100:.1f}cm")
+                    # Live feed as a visual checkpoint before the arm moves: the
+                    # frame shown during depth fusion (see _build_object_point_cloud)
+                    # otherwise stays frozen through planning/execution below.
+                    _show_camera_viewer_blocking("torso", robot_ip)
+                    plan = reachy_grasp.plan_grasp(reachy, geometry)
+                    if plan is None:
+                        print(f"[{class_name}] no feasible grasp (too wide for the gripper, "
+                              "or its pose couldn't be estimated)")
+                    else:
+                        graphs.show_grasp_plan(geometry, plan)
+                        reachy_grasp.execute_grasp(reachy, plan)
+                break
+            # No -> back to the same captured frame/detections, all blue again
+
+        cv2.destroyWindow(grasp.CAM_WINDOW_NAME)
         return crs_x, crs_y
-
-    while True:
-        class_name, box, captured, crs_x, crs_y = _select_object_to_grasp_bomi(
-            cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
-            depth_cam, model, confidence, captured, reachy,
-        )
-        if class_name is None:
-            break
-
-        decision, crs_x, crs_y = _confirm_grasp_bomi(
-            cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, class_name,
-        )
-        if decision is None:
-            break
-        if decision:
-            geometry = grasp._build_object_point_cloud(depth_cam, class_name, box)
-            if geometry is not None:
-                print(f"[{class_name}] estimated width={geometry.width_m * 100:.1f}cm  "
-                      f"height={geometry.height_m * 100:.1f}cm")
-                # Live feed as a visual checkpoint before the arm moves: the
-                # frame shown during depth fusion (see _build_object_point_cloud)
-                # otherwise stays frozen through planning/execution below.
-                _show_camera_viewer_blocking("torso", robot_ip)
-                plan = reachy_grasp.plan_grasp(reachy, geometry)
-                if plan is None:
-                    print(f"[{class_name}] no feasible grasp (too wide for the gripper, "
-                          "or its pose couldn't be estimated)")
-                else:
-                    graphs.show_grasp_plan(geometry, plan)
-                    reachy_grasp.execute_grasp(reachy, plan)
-            break
-        # No -> back to the same captured frame/detections, all blue again
-
-    cv2.destroyWindow(grasp.CAM_WINDOW_NAME)
-    return crs_x, crs_y
+    finally:
+        _in_grasp_phase = False
 
 
 # --- Pre-grasping pose, held between the two Control dwell phases ---
@@ -599,7 +612,7 @@ def main() -> None:
 
     def _on_emergency_quit() -> None:
         _stop_all_camera_viewers()
-        safety.emergency_shutdown(reachy, mobile_base)
+        safety.emergency_shutdown(reachy, mobile_base, rotate_base_before_shutdown=_in_grasp_phase)
 
     safety.start_global_quit_watcher(_on_emergency_quit)
     stop_terminal_watcher = safety.start_terminal_quit_watcher(_on_emergency_quit)
@@ -644,7 +657,7 @@ def main() -> None:
         _stop_all_camera_viewers()
         if stop_terminal_watcher is not None:
             stop_terminal_watcher()
-        safety.safe_robot_shutdown(reachy, mobile_base)
+        safety.safe_robot_shutdown(reachy, mobile_base, rotate_base_before_shutdown=_in_grasp_phase)
         if cap is not None:
             cap.release()
         cv2.destroyAllWindows()
