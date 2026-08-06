@@ -29,7 +29,6 @@ from ultralytics import YOLO
 import graphs
 import reachy_grasp
 import safety
-import stream
 
 # Placeholder — replace with the robot's actual IP.
 DEFAULT_ROBOT_IP = "192.168.0.121"
@@ -249,11 +248,6 @@ def _draw_confirm_canvas(class_name: str, yes_progress: float, no_progress: floa
             cv2.rectangle(canvas, (x1, y2 - 8), (x1 + bar_width, y2), COLOR_BUTTON_TEXT, -1)
 
     return canvas
-
-
-def _stream_torso_camera(depth_cam: DepthCamera) -> None:
-    """Plain live RGB feed from the torso camera, no detection."""
-    stream.stream_blocking(depth_cam, CAM_WINDOW_NAME, safety.quit_requested)
 
 
 Capture = Tuple[np.ndarray, List[Detection], dict]
