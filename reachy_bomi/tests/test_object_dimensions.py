@@ -40,6 +40,7 @@ from reachy2_sdk import ReachySDK
 from ultralytics import YOLO
 
 import reachy_detection
+import safety
 
 DEFAULT_ROBOT_IP = "192.168.0.121"
 
@@ -117,7 +118,7 @@ def _stream_and_measure(depth_cam, model: YOLO, confidence: float) -> None:
             hovered_box, hover_start = None, None  # needs a fresh hold to fire again
 
         key = cv2.waitKey(1) & 0xFF
-        if reachy_detection._quit_requested(key, reachy_detection.CAM_WINDOW_NAME):
+        if safety.quit_requested(key, reachy_detection.CAM_WINDOW_NAME):
             break
 
     cv2.destroyWindow(reachy_detection.CAM_WINDOW_NAME)

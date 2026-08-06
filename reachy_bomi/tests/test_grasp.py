@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Test script for the object selection + grasp planning + execution pipeline.
+Test script for the object selection + grasp planning + execution pipeline,
+mouse-driven (no BoMI cursor/webcam needed) -- the counterpart to
+reachy_control.py's BoMI-cursor-driven _select_object_to_grasp_bomi/
+_confirm_grasp_bomi.
 
 Connects to Reachy, sends both arms straight to the elbow_135 starting
-posture, then runs the same hover-select/confirm flow as
-reachy_detection.py. Once an object is confirmed, its point cloud is built,
-reachy_grasp.plan_grasp computes pre-grasp/grasp/lift poses (plotted via
-show_grasp_plan), and reachy_grasp.execute_grasp drives the arm through
-them for real.
+posture, then hover-selects an object with the mouse and confirms it.
+Once confirmed, its point cloud is built, reachy_grasp.plan_grasp computes
+pre-grasp/grasp/lift poses (plotted via graphs.show_grasp_plan), and
+reachy_grasp.execute_grasp drives the arm through them for real.
 
 Usage:
     python3 test_grasp.py [robot_ip]
@@ -18,13 +20,14 @@ Usage:
         --yolo-model PATH   YOLOv8 weights (.pt). Default: yolov8n.pt
         --conf FLOAT        Minimum detection confidence. Default: 0.5
 
-    Q, ESC, or closing a window with the X = quit / go back, same as
-    reachy_detection.py.
+    Q, ESC, or closing a window with the X = quit / go back.
 """
 
 import argparse
 import os
 import sys
+import time
+from typing import Optional, Tuple
 
 import cv2
 
@@ -36,10 +39,119 @@ from ultralytics import YOLO
 import graphs
 import reachy_detection
 import reachy_grasp
+import safety
 
 # Same convention as tests/elbow_135.py.
 ELBOW_PITCH_DEG = -135.0
 ELBOW_MOVE_DURATION_S = 3.0
+
+
+def _select_object_to_grasp(
+    depth_cam, model: YOLO, confidence: float, captured: "reachy_detection.Capture",
+) -> Tuple[Optional[str], Optional["reachy_detection.Box"], "reachy_detection.Capture"]:
+    """Mouse-driven equivalent of reachy_control._select_object_to_grasp_bomi
+    (which hovers with the BoMI cursor instead) -- detect-and-hover loop on
+    an already-captured frame. Returns the class name and its box once held
+    green for HOVER_HOLD_SECONDS (or None, None if the user quit), plus the
+    possibly-refreshed (frame, detections, labels), so a later re-entry
+    (e.g. after answering "No") can reuse them without recapturing."""
+    base_frame, detections, labels = captured
+
+    mouse = reachy_detection._MouseTracker(reachy_detection.CAM_WINDOW_NAME)
+    hovered_box = None
+    hover_start: Optional[float] = None
+    button_hover_start: Optional[float] = None
+
+    print(f"\n=== CAPTURED FRAME (RGB + YOLO) ===  Q = quit  |  "
+          f"hover Refresh for {reachy_detection.REFRESH_HOVER_SECONDS:.0f}s to recapture")
+    while True:
+        now = time.time()
+        on_button = reachy_detection._box_contains(reachy_detection.REFRESH_BUTTON_BOX, mouse.x, mouse.y)
+        if not on_button:
+            button_hover_start = None
+        elif button_hover_start is None:
+            button_hover_start = now
+        elif now - button_hover_start >= reachy_detection.REFRESH_HOVER_SECONDS:
+            refreshed = reachy_detection._capture_and_detect(depth_cam, model, confidence)
+            if refreshed is not None:
+                base_frame, detections, labels = refreshed
+            hovered_box, hover_start = None, None
+            button_hover_start = None
+
+        frame = base_frame.copy()
+
+        hovered = reachy_detection._find_hovered_detection(detections, mouse.x, mouse.y)
+
+        if hovered is None:
+            hovered_box, hover_start = None, None
+        else:
+            box = hovered[2]
+            if hovered_box is None or reachy_detection._iou(box, hovered_box) < reachy_detection.HOVER_IOU_MATCH:
+                hover_start = now
+            hovered_box = box
+        hover_duration = (now - hover_start) if hover_start is not None else 0.0
+
+        is_held = hovered is not None and hover_duration >= reachy_detection.HOVER_HOLD_SECONDS
+
+        if is_held:
+            box = hovered[2]
+            reachy_detection._draw_box(frame, box, labels[box], reachy_detection.COLOR_GREEN)
+            cv2.imshow(reachy_detection.CAM_WINDOW_NAME, frame)
+            cv2.waitKey(1)
+            return hovered[0], box, (base_frame, detections, labels)
+
+        hover_progress = min(hover_duration / reachy_detection.HOVER_HOLD_SECONDS, 1.0) if hovered is not None else 0.0
+        for class_name, conf, box in detections:
+            is_hovered = hovered is not None and box == hovered[2]
+            color = reachy_detection.COLOR_YELLOW if is_hovered else reachy_detection.COLOR_BLUE
+            reachy_detection._draw_box(frame, box, labels[box], color, hover_progress if is_hovered else 0.0)
+
+        button_progress = (
+            min((now - button_hover_start) / reachy_detection.REFRESH_HOVER_SECONDS, 1.0) if button_hover_start else 0.0
+        )
+        reachy_detection._draw_refresh_button(frame, button_progress)
+        cv2.imshow(reachy_detection.CAM_WINDOW_NAME, frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if safety.quit_requested(key, reachy_detection.CAM_WINDOW_NAME):
+            return None, None, (base_frame, detections, labels)
+
+
+def _confirm_grasp(class_name: str) -> Optional[bool]:
+    """Mouse-driven equivalent of reachy_control._confirm_grasp_bomi.
+    Blocking Yes/No dialog. Returns True (Yes), False (No), or None if the
+    user quit."""
+    mouse = reachy_detection._MouseTracker(reachy_detection.CONFIRM_WINDOW_NAME)
+    yes_hover_start: Optional[float] = None
+    no_hover_start: Optional[float] = None
+
+    while True:
+        now = time.time()
+        on_yes = reachy_detection._box_contains(reachy_detection.YES_BUTTON_BOX, mouse.x, mouse.y)
+        on_no = reachy_detection._box_contains(reachy_detection.NO_BUTTON_BOX, mouse.x, mouse.y)
+
+        yes_hover_start = (yes_hover_start or now) if on_yes else None
+        no_hover_start = (no_hover_start or now) if on_no else None
+
+        yes_progress = min((now - yes_hover_start) / reachy_detection.CONFIRM_HOVER_SECONDS, 1.0) if yes_hover_start else 0.0
+        no_progress = min((now - no_hover_start) / reachy_detection.CONFIRM_HOVER_SECONDS, 1.0) if no_hover_start else 0.0
+
+        cv2.imshow(
+            reachy_detection.CONFIRM_WINDOW_NAME,
+            reachy_detection._draw_confirm_canvas(class_name, yes_progress, no_progress),
+        )
+
+        key = cv2.waitKey(1) & 0xFF
+        result: Optional[bool] = None
+        quit_now = safety.quit_requested(key, reachy_detection.CONFIRM_WINDOW_NAME)
+        if yes_progress >= 1.0:
+            result = True
+        elif no_progress >= 1.0:
+            result = False
+
+        if quit_now or result is not None:
+            cv2.destroyWindow(reachy_detection.CONFIRM_WINDOW_NAME)
+            return None if quit_now else result
 
 
 def _test_grasp_planning(reachy: ReachySDK, model: YOLO, confidence: float) -> None:
@@ -54,11 +166,11 @@ def _test_grasp_planning(reachy: ReachySDK, model: YOLO, confidence: float) -> N
         return
 
     while True:
-        class_name, box, captured = reachy_detection._select_object_to_grasp(depth_cam, model, confidence, captured)
+        class_name, box, captured = _select_object_to_grasp(depth_cam, model, confidence, captured)
         if class_name is None:
             break
 
-        decision = reachy_detection._confirm_grasp(class_name)
+        decision = _confirm_grasp(class_name)
         if decision is None:
             break
         if decision:
@@ -116,6 +228,12 @@ def main() -> None:
 
     reachy.turn_on()
 
+    def _on_emergency_quit() -> None:
+        safety.emergency_shutdown(reachy)
+
+    safety.start_global_quit_watcher(_on_emergency_quit)
+    stop_terminal_watcher = safety.start_terminal_quit_watcher(_on_emergency_quit)
+
     # Straight to elbow_135's final joint configuration, no intermediate
     # "default" posture first (unlike tests/elbow_135.py itself).
     for arm in (reachy.r_arm, reachy.l_arm):
@@ -132,6 +250,8 @@ def main() -> None:
     try:
         _test_grasp_planning(reachy, model, cli_args.conf)
     finally:
+        if stop_terminal_watcher is not None:
+            stop_terminal_watcher()
         cv2.destroyAllWindows()
         reachy.disconnect()
 

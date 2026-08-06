@@ -23,6 +23,12 @@ Usage:
         --yolo-model PATH    YOLOv8 weights (.pt). Default: yolov8n.pt
         --conf FLOAT         Minimum YOLO detection confidence. Default: 0.5
 
+From right after calibration through Phase 3.5, Reachy's torso camera (LEFT
+view) is streamed live in its own window (see _show_torso_frame), so the
+operator can see what the robot sees while driving up to an object. It
+closes the moment Phase 4 (object selection) opens, since that phase opens
+its own live feed of the same camera.
+
 Phases 1-2 (Calibration, Cursor preview): identical to bomi_teleop.py.
 
 Phase 3 - Control:
@@ -63,6 +69,8 @@ from ultralytics import YOLO
 import graphs
 import reachy_detection as grasp
 import reachy_grasp
+import safety
+import stream
 import bomi_teleop as teleop
 
 # Placeholder — replace with the robot's actual IP.
@@ -81,7 +89,16 @@ PRE_GRASP_MOVE_DURATION = 5.0  # seconds, arm goto duration into the pre-graspin
 
 # Linear/angular velocity multiplier for Control once the arms are in the
 # pre-grasping pose, so driving up to the object is finer-grained.
-HALVED_SPEED_FACTOR = 0.5
+HALVED_SPEED_FACTOR = 0.7 # TODO: find a good parameter to set
+
+TORSO_CAM_WINDOW_NAME = "BoMI - Torso Camera (LEFT)"
+
+# Cap on how often _show_torso_frame actually fetches a frame: depth_cam.get_frame
+# is a network round-trip to the robot, and _show_torso_frame is called every
+# loop iteration with no gating of its own -- unthrottled, that round-trip
+# becomes the slowest thing in the loop and drags down cursor/velocity
+# responsiveness too, not just the torso camera window's own update rate.
+TORSO_CAM_HZ = 12.0
 
 WAIT_WINDOW_NAME = "BoMI - Waiting"
 WAIT_CANVAS_WIDTH = 640
@@ -130,14 +147,33 @@ def _draw_bomi_cursor(frame, x: int, y: int) -> None:
     cv2.drawMarker(frame, (x, y), COLOR_CURSOR, markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
 
 
+_last_torso_frame_time = 0.0
+
+
+def _show_torso_frame(depth_cam) -> None:
+    """One non-blocking grab+show of Reachy's torso camera LEFT view, from
+    calibration through to the pre-grasping pose, so the operator can see
+    what the robot sees while driving up to an object. Throttled to
+    TORSO_CAM_HZ (see there) rather than fetching on every call, since
+    callers invoke this once per loop iteration with no rate limit of
+    their own."""
+    global _last_torso_frame_time
+    now = time.time()
+    if now - _last_torso_frame_time < 1.0 / TORSO_CAM_HZ:
+        return
+    _last_torso_frame_time = now
+    stream.show_frame(depth_cam, TORSO_CAM_WINDOW_NAME)
+
+
 # --- BoMI-cursor equivalents of reachy_detection's mouse-driven UI ---
 
 def _select_object_to_grasp_bomi(
     cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
     depth_cam, model, confidence, captured,
 ):
-    """Same hover-to-select/hover-Refresh loop as reachy_detection._select_object_to_grasp,
-    but the hover point is the BoMI cursor mapped into the captured frame."""
+    """Same hover-to-select/hover-Refresh loop as tests/test_grasp.py's
+    _select_object_to_grasp, but the hover point is the BoMI cursor mapped
+    into the captured frame."""
     base_frame, detections, labels = captured
     frame_h, frame_w = base_frame.shape[:2]
 
@@ -200,13 +236,14 @@ def _select_object_to_grasp_bomi(
         cv2.imshow(grasp.CAM_WINDOW_NAME, frame)
 
         key = cv2.waitKey(1) & 0xFF
-        if grasp._quit_requested(key, grasp.CAM_WINDOW_NAME):
+        if safety.quit_requested(key, grasp.CAM_WINDOW_NAME):
             return None, None, (base_frame, detections, labels), crs_x, crs_y
 
 
 def _confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, class_name):
-    """Same Yes/No dwell dialog as reachy_detection._confirm_grasp, hovered with the
-    BoMI cursor mapped into the confirm canvas instead of the mouse."""
+    """Same Yes/No dwell dialog as tests/test_grasp.py's _confirm_grasp,
+    hovered with the BoMI cursor mapped into the confirm canvas instead of
+    the mouse."""
     yes_hover_start = None
     no_hover_start = None
 
@@ -229,7 +266,7 @@ def _confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, 
 
         key = cv2.waitKey(1) & 0xFF
         result = None
-        quit_now = grasp._quit_requested(key, grasp.CONFIRM_WINDOW_NAME)
+        quit_now = safety.quit_requested(key, grasp.CONFIRM_WINDOW_NAME)
         if yes_progress >= 1.0:
             result = True
         elif no_progress >= 1.0:
@@ -241,10 +278,10 @@ def _confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, 
 
 
 def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, reachy, crs_x, crs_y):
-    """BoMI-driven equivalent of reachy_detection._show_torso_camera: capture ->
-    hover-select -> confirm, looping back on "No" until an object is
-    confirmed (then builds its point cloud, plans and executes the grasp,
-    and streams the live feed) or the user quits."""
+    """BoMI-driven equivalent of tests/test_grasp.py's _test_grasp_planning:
+    capture -> hover-select -> confirm, looping back on "No" until an object is
+    confirmed (then builds its point cloud, streams the live feed as a
+    checkpoint, then plans and executes the grasp) or the user quits."""
     captured = grasp._capture_and_detect(depth_cam, model, confidence)
     if captured is None:
         return crs_x, crs_y
@@ -267,6 +304,10 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
             if geometry is not None:
                 print(f"[{class_name}] estimated width={geometry.width_m * 100:.1f}cm  "
                       f"height={geometry.height_m * 100:.1f}cm")
+                # Live feed as a visual checkpoint before the arm moves: the
+                # frame shown during depth fusion (see _build_object_point_cloud)
+                # otherwise stays frozen through planning/execution below.
+                grasp._stream_torso_camera(depth_cam)
                 plan = reachy_grasp.plan_grasp(reachy, geometry)
                 if plan is None:
                     print(f"[{class_name}] no feasible grasp (too wide for the gripper, "
@@ -274,7 +315,6 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
                 else:
                     graphs.show_grasp_plan(geometry, plan)
                     reachy_grasp.execute_grasp(reachy, plan)
-                grasp._stream_torso_camera(depth_cam)
             break
         # No -> back to the same captured frame/detections, all blue again
 
@@ -316,10 +356,11 @@ def _draw_wait_canvas(progress: float) -> np.ndarray:
     return canvas
 
 
-def _wait_for_pre_grasp_pose(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, reachy, mobile_base, goto_ids):
-    """Blocks until every goto in goto_ids has finished, showing a dedicated 
-    waiting window with a progress bar. The base is repeatedly held at zero 
-    speed throughout. Returns the possibly updated cursor position and whether 
+def _wait_for_pre_grasp_pose(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, reachy, mobile_base, goto_ids,
+                              depth_cam):
+    """Blocks until every goto in goto_ids has finished, showing a dedicated
+    waiting window with a progress bar. The base is repeatedly held at zero
+    speed throughout. Returns the possibly updated cursor position and whether
     the user quit."""
     dt = 1.0 / teleop.PUBLISH_HZ
     last_publish = time.time()
@@ -330,6 +371,7 @@ def _wait_for_pre_grasp_pose(cap, landmarker, bomi_map, cursor_filter, crs_x, cr
 
         progress = min((time.time() - start) / PRE_GRASP_MOVE_DURATION, 1.0)
         cv2.imshow(WAIT_WINDOW_NAME, _draw_wait_canvas(progress))
+        _show_torso_frame(depth_cam)
 
         now = time.time()
         if now - last_publish >= dt:
@@ -338,7 +380,7 @@ def _wait_for_pre_grasp_pose(cap, landmarker, bomi_map, cursor_filter, crs_x, cr
             last_publish = now
 
         key = cv2.waitKey(1) & 0xFF
-        if teleop._quit_requested(key, WAIT_WINDOW_NAME):
+        if safety.quit_requested(key, WAIT_WINDOW_NAME):
             cv2.destroyWindow(WAIT_WINDOW_NAME)
             return crs_x, crs_y, True
 
@@ -395,6 +437,7 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
         )
 
         cv2.imshow(map_window, teleop._draw_cursor_map(crs_x, crs_y, region, message))
+        _show_torso_frame(depth_cam)
 
         if center_progress >= 1.0 and not pre_grasp_reached:
             # First dwell: stop and hold here while the arms move, then resume
@@ -405,7 +448,7 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
                   f"(elbow pitch {PRE_GRASP_ELBOW_PITCH_DEG:.0f} deg)...")
             goto_ids = _goto_pre_grasp_pose(reachy)
             crs_x, crs_y, quit_now = _wait_for_pre_grasp_pose(
-                cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, reachy, mobile_base, goto_ids,
+                cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, reachy, mobile_base, goto_ids, depth_cam,
             )
             if quit_now:
                 break
@@ -413,6 +456,7 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
 
             crs_x, crs_y = teleop._cursor_preview_phase(
                 cap, landmarker, bomi_map, cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y, show_cam=False,
+                on_frame=lambda: _show_torso_frame(depth_cam),
             )
 
             pre_grasp_reached = True
@@ -432,6 +476,7 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
             mobile_base.turn_off()
             print("\nMobile base powered off. Switching to object selection for good.")
             cv2.destroyWindow(map_window)
+            cv2.destroyWindow(TORSO_CAM_WINDOW_NAME)
             _run_grasp_mode(
                 cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, reachy, crs_x, crs_y,
             )
@@ -445,13 +490,14 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
             last_publish = now
 
         key = cv2.waitKey(1) & 0xFF
-        if teleop._quit_requested(key, map_window):
+        if safety.quit_requested(key, map_window):
             break
 
     mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
     mobile_base.send_speed_command()
     mobile_base.turn_off()
     cv2.destroyWindow(map_window)
+    cv2.destroyWindow(TORSO_CAM_WINDOW_NAME)  # no-op if already closed (Phase 4 switch closes it itself)
 
 
 # --- Entry point ---
@@ -502,17 +548,11 @@ def main() -> None:
     mobile_base.lidar.safety_critical_distance = teleop.LIDAR_CRITICAL_DISTANCE
     mobile_base.turn_on()
 
-    def _emergency_shutdown() -> None:
-        print("\n[QUIT] ESC/Q pressed — stopping the robot and exiting.")
-        try:
-            teleop.safe_robot_shutdown(reachy, mobile_base)
-            reachy.disconnect()
-            cv2.destroyAllWindows()
-        finally:
-            os._exit(0)
+    def _on_emergency_quit() -> None:
+        safety.emergency_shutdown(reachy, mobile_base)
 
-    teleop.start_global_quit_watcher(_emergency_shutdown)
-    stop_terminal_watcher = teleop.start_terminal_quit_watcher(_emergency_shutdown)
+    safety.start_global_quit_watcher(_on_emergency_quit)
+    stop_terminal_watcher = safety.start_terminal_quit_watcher(_on_emergency_quit)
 
     print(f"Loading YOLO model '{cli_args.yolo_model}'...")
     model = YOLO(cli_args.yolo_model)
@@ -544,13 +584,14 @@ def main() -> None:
         cursor_filter = teleop.CursorFilter()
         crs_x, crs_y = teleop._cursor_preview_phase(
             cap, landmarker, bomi_map, cursor_filter=cursor_filter, show_cam=False,
+            on_frame=lambda: _show_torso_frame(depth_cam),
         )
         _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, model, cli_args.conf, reachy,
                                    cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y)
     finally:
         if stop_terminal_watcher is not None:
             stop_terminal_watcher()
-        teleop.safe_robot_shutdown(reachy, mobile_base)
+        safety.safe_robot_shutdown(reachy, mobile_base)
         if cap is not None:
             cap.release()
         cv2.destroyAllWindows()

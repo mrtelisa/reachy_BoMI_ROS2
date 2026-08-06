@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Test/dry-run version of reachy_control.py's full flow: same
+Test/dry-run version of reachy_control.py's navigation flow: same
 calibration -> cursor preview -> Control -> pre-grasping pose -> object
 selection sequence, but entirely self-contained like test_teleop.py --
 no reachy2_sdk / ultralytics import, no robot, no depth camera, no YOLO
-model. Use this to sanity-check the pre-grasping-pose addition (dwell,
-waiting screen, halved-speed resume) before running the real script
-against the robot.
+model (reachy_control.py itself can't be imported without all of those,
+so the logic below is a deliberate copy, not an import -- keep it in sync
+by hand; constants that need it say so). Use this to sanity-check the
+pre-grasping-pose addition (dwell, waiting screen, halved-speed resume)
+before running the real script against the robot.
 
 Dependencies:
     pip install mediapipe opencv-python scikit-learn numpy scipy
 
 Usage:
-    python3 test_reachy_control.py
+    python3 test_navigation.py
     Options:
         --model PATH    Path to the MediaPipe hand_landmarker.task model.
         --cam INDEX     Webcam index. Default: 0
@@ -64,7 +66,7 @@ HAND_CONNECTIONS = hand_landmarker.HandLandmarksConnections.HAND_CONNECTIONS
 BASE_WIDTH = 2550
 BASE_HEIGHT = 1500
 
-MAX_LINEAR = 0.6      # m/s
+MAX_LINEAR = 0.8      # m/s -- KEEP IN SYNC with bomi_teleop.MAX_LINEAR (real value reachy_control.py uses)
 MAX_ANGULAR = 0.8     # rad/s
 DEAD_ZONE_PX = 200    # pixel radius around screen center before motion starts
 
@@ -74,10 +76,9 @@ CURSOR_FILTER_HZ = 30.0        # assumed webcam/control loop sample rate
 CURSOR_FILTER_CUTOFF_HZ = 4.0  # cutoff frequency
 
 DEFAULT_MODEL_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "hand_landmarker.task"
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "hand_landmarker.task"
 )
 
-CAM_WINDOW_NAME = "BoMI - Camera (TEST)"
 MAP_WINDOW_NAME = "BoMI - Cursor Map (TEST)"
 WAIT_WINDOW_NAME = "BoMI - Waiting (TEST)"
 WAIT_CANVAS_WIDTH = 640
@@ -92,9 +93,9 @@ SELECTION_HOLD_SECONDS = 5.0
 PRE_GRASP_MOVE_DURATION = 5.0
 PRE_GRASP_ELBOW_PITCH_DEG = -135.0
 
-HALVED_SPEED_FACTOR = 0.5
-
-COLOR_CURSOR = (255, 0, 255)
+# KEEP IN SYNC with reachy_control.HALVED_SPEED_FACTOR by hand -- can't be
+# imported directly (see module docstring).
+HALVED_SPEED_FACTOR = 0.7
 
 
 # --- Velocity helpers (copied from bomi_teleop.py) ---------
@@ -267,6 +268,13 @@ class CursorFilter:
 
         return float(new_output[0]), float(new_output[1])
 
+    def reset(self, crs_x: float, crs_y: float) -> None:
+        """Reinit history to steady-state at (crs_x, crs_y), so tracking
+        resumed after a gap doesn't overshoot on stale samples."""
+        steady = np.array([crs_x, crs_y])
+        self._in_history[:] = steady
+        self._out_history[:] = steady
+
 
 class BoMIMap:
     """PCA forward map: raw hand landmarks -> 2D cursor in screen space.
@@ -406,13 +414,12 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: Cur
         cv2.putText(frame, "PREVIEW - nothing logged. ENTER=start control  Q=quit",
                     (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-        cv2.imshow(CAM_WINDOW_NAME, frame)
         cv2.imshow(MAP_WINDOW_NAME, _draw_cursor_map(crs_x, crs_y, region, "(preview - not computed)"))
 
         key = cv2.waitKey(1) & 0xFF
         if key == 13:  # ENTER
             break
-        if _quit_requested(key, CAM_WINDOW_NAME) or _quit_requested(key, MAP_WINDOW_NAME):
+        if _quit_requested(key, MAP_WINDOW_NAME):
             print("Aborted.")
             sys.exit(0)
 
@@ -451,15 +458,13 @@ def _wait_for_pre_grasp_pose(cap, landmarker, bomi_map, cursor_filter, crs_x, cr
     finish_at = start + duration
 
     while True:
-        frame, crs_x, crs_y, _ = _update_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
-        if frame is not None:
-            cv2.imshow(CAM_WINDOW_NAME, frame)
+        _, crs_x, crs_y, _ = _update_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
 
         progress = min((time.time() - start) / duration, 1.0)
         cv2.imshow(WAIT_WINDOW_NAME, _draw_wait_canvas(progress))
 
         key = cv2.waitKey(1) & 0xFF
-        if _quit_requested(key, CAM_WINDOW_NAME) or _quit_requested(key, WAIT_WINDOW_NAME):
+        if _quit_requested(key, WAIT_WINDOW_NAME):
             cv2.destroyWindow(WAIT_WINDOW_NAME)
             return crs_x, crs_y, True
 
@@ -498,8 +503,8 @@ def _control_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: CursorFilt
           "to move to the pre-grasping pose")
 
     while True:
-        frame, crs_x, crs_y, hand_detected = _update_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
-        if frame is None:
+        hand_frame, crs_x, crs_y, hand_detected = _update_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
+        if hand_frame is None:
             continue
 
         if hand_detected:
@@ -516,17 +521,6 @@ def _control_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: CursorFilt
         center_progress = (
             min((now - center_hold_start) / SELECTION_HOLD_SECONDS, 1.0) if center_hold_start else 0.0
         )
-
-        cv2.putText(frame, f"region={region}  cursor=({crs_x:.0f},{crs_y:.0f})",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, f"-> (test) would send: {message}",
-                    (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        if center_progress > 0:
-            hold_label = "hold to select object" if pre_grasp_reached else "hold for pre-grasping pose"
-            cv2.putText(frame, f"{hold_label}: {center_progress * 100:.0f}%",
-                        (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_CURSOR, 2)
-
-        cv2.imshow(CAM_WINDOW_NAME, frame)
         cv2.imshow(MAP_WINDOW_NAME, _draw_cursor_map(crs_x, crs_y, region, message))
 
         if center_progress >= 1.0 and not pre_grasp_reached:
@@ -536,6 +530,7 @@ def _control_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: CursorFilt
             )
             if quit_now:
                 break
+            cursor_filter.reset(crs_x, crs_y)
 
             crs_x, crs_y = _cursor_preview_phase(
                 cap, landmarker, bomi_map, cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y,
@@ -562,11 +557,10 @@ def _control_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: CursorFilt
             last_publish = now
 
         key = cv2.waitKey(1) & 0xFF
-        if _quit_requested(key, CAM_WINDOW_NAME) or _quit_requested(key, MAP_WINDOW_NAME):
+        if _quit_requested(key, MAP_WINDOW_NAME):
             break
 
     print("[TEST] lin_vel=+0.000 m/s   ang_vel=+0.000 rad/s   stop")
-    cv2.destroyWindow(CAM_WINDOW_NAME)
     cv2.destroyWindow(MAP_WINDOW_NAME)
 
 

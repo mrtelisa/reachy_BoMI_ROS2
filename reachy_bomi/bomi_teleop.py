@@ -1,62 +1,39 @@
 #!/usr/bin/env python3
 """
-BoMI teleop for Reachy2: hand tracking directly to the mobile base, over
-reachy2_sdk (gRPC/IP) — no ROS 2 required on this machine, so its ROS 2
-distro (if any) doesn't need to match the robot's.
+BoMI teleop building blocks for Reachy2: hand tracking (MediaPipe) to a
+calibrated PCA cursor to 9-region base velocity, over reachy2_sdk
+(gRPC/IP) -- no ROS 2 required on this machine, so its ROS 2 distro (if
+any) doesn't need to match the robot's.
 
-Runs entirely on a single PC with a webcam and network access to the robot;
-mediapipe/opencv computation and the reachy2_sdk client live in the same
-process.
+Library module, no CLI of its own -- reachy_control.py is the real entry
+point and imports these pieces (calibration/cursor-preview phases, the
+BoMI map, cursor filter, velocity helpers, drawing helpers). For a
+teleop-only dry run with no robot, see tests/test_teleop.py -- it can't
+just import this module instead, since `import safety` below pulls in
+reachy2_sdk (needed for its ReachySDK type hints), so tests/test_teleop.py
+duplicates the relevant pieces by hand to stay installable without it.
 
-Dependencies:
-    pip install reachy2-sdk mediapipe opencv-python scikit-learn numpy scipy
+Phase 1 - Calibration (_calibration_phase): move your hand through all
+    positions you intend to use. SPACE = record sample, ENTER = finish
+    (min 30 samples required).
 
-Usage:
-    # Every run starts with calibration, then goes straight into control.
-    python3 bomi_teleop.py [robot_ip]
-
-    <robot_ip> is optional; if omitted, DEFAULT_ROBOT_IP (set in this file) is used.
-
-    Options:
-        --model PATH           Path to the MediaPipe hand_landmarker.task model.
-                               Default: hand_landmarker.task inside the package.
-        --cam INDEX            Webcam index. Default: 0
-
-Phase 1 - Calibration (always runs first):
-    Move your hand through all positions you intend to use.
-    SPACE = record sample   |   ENTER = finish (min 30 samples required)
-
-Phase 2 - Cursor preview (no robot motion):
-    Same cursor/region view as Control, but nothing is sent to the robot.
-    Use this to get a feel for the cursor before it starts driving the base.
-    Opens the same cam/map windows used by Control; they stay open across the
-    ENTER press below rather than closing and reopening.
-    ENTER = proceed to Control   |   Q, ESC, or closing a window = quit
-
-Phase 3 - Control:
-    Hand movement -> PCA cursor -> 9-region velocity -> mobile base.
-    Opens two windows: the webcam feed with landmarks, and a map of the
-    virtual screen with the 9-region grid lines and a dot at the current
-    cursor position.
-    Q, ESC, or closing a window with the X = quit and stop the robot.
+Phase 2 - Cursor preview (_cursor_preview_phase): same cursor/region view
+    as Control, but nothing is sent to the robot -- lets the caller get a
+    feel for the cursor before it starts driving anything.
 """
 
-import argparse
-import math
 import os
 import sys
-import threading
 import time
 
 import cv2
 import mediapipe as mp
 import numpy as np
 import scipy.signal as sgn
-from mediapipe.tasks.python.core import base_options
 from mediapipe.tasks.python.vision import hand_landmarker
-from mediapipe.tasks.python.vision.core import vision_task_running_mode
-from reachy2_sdk import ReachySDK
 from sklearn.decomposition import PCA
+
+import safety
 
 HAND_CONNECTIONS = hand_landmarker.HandLandmarksConnections.HAND_CONNECTIONS
 
@@ -68,7 +45,7 @@ LIDAR_CRITICAL_DISTANCE = 0.55  # m
 BASE_WIDTH = 2550
 BASE_HEIGHT = 1500
 
-MAX_LINEAR = 0.6     # m/s
+MAX_LINEAR = 0.8     # m/s
 MAX_ANGULAR = 0.8     # rad/s
 DEAD_ZONE_PX = 200    # pixel radius around screen center before motion starts
 
@@ -202,108 +179,6 @@ def _draw_hand_landmarks(frame, landmarks) -> None:
 
     for point in points:
         cv2.circle(frame, point, 4, (0, 255, 0), -1)
-
-
-def _quit_requested(key: int, window_name: str) -> bool:
-    """True if Q/ESC was pressed, or the window was closed with the X button."""
-    if key in (ord('q'), ord('Q'), 27):
-        return True
-    try:
-        return cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1
-    except cv2.error:
-        return False
-
-
-def start_global_quit_watcher(on_quit):
-    """Hooks ESC/Q system-wide via pynput, so quitting works with no cv2
-    window focused. Returns the listener, or None if pynput is unavailable."""
-    try:
-        from pynput import keyboard
-    except ImportError:
-        print("[WARN] pynput not installed: ESC/Q only quits with a window focused.")
-        return None
-
-    def _on_press(key) -> None:
-        if key == keyboard.Key.esc or getattr(key, "char", None) in ("q", "Q"):
-            on_quit()
-
-    try:
-        listener = keyboard.Listener(on_press=_on_press)
-        listener.daemon = True
-        listener.start()
-        return listener
-    except Exception as exc:
-        print(f"[WARN] Could not start the global ESC/Q watcher ({exc}).")
-        return None
-
-
-def start_terminal_quit_watcher(on_quit):
-    """Watches this process's own terminal for ESC/Q, for when the terminal
-    (not a cv2 window, not the global pynput hook under Wayland) is what
-    actually has keyboard focus. Returns a stop() to restore the terminal,
-    or None if stdin isn't an interactive terminal."""
-    import select
-    import termios
-    import tty
-
-    if not sys.stdin.isatty():
-        return None
-
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    stop_flag = threading.Event()
-
-    def _restore() -> None:
-        try:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        except Exception:
-            pass
-
-    def _watch() -> None:
-        tty.setcbreak(fd)
-        try:
-            while not stop_flag.is_set():
-                ready, _, _ = select.select([sys.stdin], [], [], 0.2)
-                if ready and sys.stdin.read(1) in ("q", "Q", "\x1b"):
-                    _restore()
-                    on_quit()
-                    return
-        finally:
-            _restore()
-
-    threading.Thread(target=_watch, daemon=True).start()
-
-    def stop() -> None:
-        stop_flag.set()
-        _restore()
-
-    return stop
-
-
-def safe_robot_shutdown(reachy: ReachySDK, mobile_base=None) -> None:
-    """Stop the base, then power down smoothly (falls back to a hard
-    turn_off). Swallows exceptions since this also runs on the emergency
-    quit path, where raising would block the process from exiting."""
-    if mobile_base is not None:
-        try:
-            mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
-            mobile_base.send_speed_command()
-        except Exception:
-            pass
-
-    try:
-        reachy.turn_off_smoothly()
-    except Exception:
-        try:
-            reachy.turn_off()
-        except Exception:
-            pass
-
-    if mobile_base is not None:
-        try:
-            mobile_base.turn_off()
-        except Exception:
-            pass
 
 
 def _draw_cursor_map(crs_x: float, crs_y: float, region: int, message: str,
@@ -455,7 +330,7 @@ def _calibration_phase(cap, landmarker) -> list:
             else:
                 print(f"  Need at least {MIN_SAMPLES} samples (have {len(samples)})")
 
-        elif _quit_requested(key, window_name):
+        elif safety.quit_requested(key, window_name):
             print("Aborted.")
             sys.exit(0)
 
@@ -463,7 +338,8 @@ def _calibration_phase(cap, landmarker) -> list:
     return samples
 
 def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: CursorFilter = None,
-                           crs_x: float = None, crs_y: float = None, show_cam: bool = True) -> tuple:
+                           crs_x: float = None, crs_y: float = None, show_cam: bool = True,
+                           on_frame=None) -> tuple:
     """
     Shows the same cursor/region view as the control phase, but never talks to
     the robot. Lets the user get a feel for the cursor and see where it starts
@@ -473,7 +349,10 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: Cur
     reset) instead of starting fresh; returns the final (crs_x, crs_y).
     show_cam=False skips the raw camera/landmarks window entirely (still
     tracks the hand, just doesn't display it), for callers that only want
-    the cursor map on screen.
+    the cursor map on screen. on_frame, if given, is called with no
+    arguments once per loop iteration -- e.g. reachy_control.py uses it to
+    keep the robot's torso camera window live during this phase, without
+    this module needing to know anything about depth cameras.
     """
     cursor_filter = cursor_filter or CursorFilter()
     cam_window = CAM_WINDOW_NAME
@@ -515,11 +394,13 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: Cur
         if show_cam:
             cv2.imshow(cam_window, frame)
         cv2.imshow(map_window, _draw_cursor_map(crs_x, crs_y, region, "(preview - not sent)"))
+        if on_frame is not None:
+            on_frame()
 
         key = cv2.waitKey(1) & 0xFF
         if key == 13:  # ENTER
             break
-        if (show_cam and _quit_requested(key, cam_window)) or _quit_requested(key, map_window):
+        if (show_cam and safety.quit_requested(key, cam_window)) or safety.quit_requested(key, map_window):
             print("Aborted.")
             sys.exit(0)
 
@@ -528,134 +409,3 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: Cur
     return crs_x, crs_y
 
 
-def _control_phase(cap, landmarker, bomi_map: BoMIMap, mobile_base) -> None:
-    dt = 1.0 / PUBLISH_HZ
-    last_publish = time.time()
-    cursor_filter = CursorFilter()
-    cam_window = CAM_WINDOW_NAME
-    map_window = MAP_WINDOW_NAME
-
-    # Start centered (region 5) until the first hand detection updates it.
-    crs_x, crs_y = BASE_WIDTH / 2.0, BASE_HEIGHT / 2.0
-    region = check_region_cursor(crs_x, crs_y)
-    message = "lin_vel:0.000 ang_vel:0.000"
-
-    print("\n=== CONTROL ===  Q = quit")
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        frame = cv2.flip(frame, 1)
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-        results = landmarker.detect_for_video(mp_image, int(time.time() * 1000))
-
-        lin_vel, ang_vel = 0.0, 0.0
-
-        if results.hand_landmarks:
-            hl = results.hand_landmarks[0]
-            _draw_hand_landmarks(frame, hl)
-            mirror_x = results.handedness[0][0].category_name == "Right"
-            crs_x, crs_y = bomi_map.transform(_extract_hand_features(hl, mirror_x))
-            crs_x, crs_y = cursor_filter.update(crs_x, crs_y)
-            region = check_region_cursor(crs_x, crs_y)
-            lin_vel, ang_vel = compute_dynamic_vel_from_cursor(crs_x, crs_y)
-            lin_vel, ang_vel = apply_region_velocity_mask(region, lin_vel, ang_vel)
-
-            cv2.putText(
-                frame, f"region={region}  cursor=({crs_x:.0f},{crs_y:.0f})",
-                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
-            )
-            cv2.putText(
-                frame, f"-> mobile base: {message}",
-                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
-            )
-
-        now = time.time()
-        if now - last_publish >= dt:
-            message = f"lin_vel:{lin_vel:.3f} ang_vel:{ang_vel:.3f}"
-            # vtheta is in degrees/s for reachy2_sdk, ang_vel is computed in rad/s
-            mobile_base.set_goal_speed(vx=lin_vel, vy=0, vtheta=math.degrees(ang_vel))
-            mobile_base.send_speed_command()
-            last_publish = now
-
-        cv2.imshow(cam_window, frame)
-        cv2.imshow(map_window, _draw_cursor_map(crs_x, crs_y, region, message))
-
-        key = cv2.waitKey(1) & 0xFF
-        if _quit_requested(key, cam_window) or _quit_requested(key, map_window):
-            break
-
-    mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
-    mobile_base.send_speed_command()
-    cv2.destroyWindow(cam_window)
-    cv2.destroyWindow(map_window)
-
-
-# --- Entry point ---
-def main() -> None:
-    parser = argparse.ArgumentParser(description="BoMI teleop for Reachy2")
-    parser.add_argument("robot_ip", nargs="?", default=DEFAULT_ROBOT_IP,
-                        help=f"IP address of the Reachy robot (default: {DEFAULT_ROBOT_IP})")
-    parser.add_argument("--cam", type=int, default=0, help="Webcam index (default: 0)")
-    parser.add_argument("--model", default=DEFAULT_MODEL_PATH,
-                        help="Path to the MediaPipe hand_landmarker.task model "
-                             f"(default: {DEFAULT_MODEL_PATH}).")
-    cli_args = parser.parse_args()
-
-    # Fail early if the hand-landmarker model is missing
-    if not os.path.exists(cli_args.model):
-        print(f"[ERROR] MediaPipe model not found: '{cli_args.model}'")
-        print("        Download hand_landmarker.task and pass its path with --model.")
-        sys.exit(1)
-
-    reachy = ReachySDK(host=cli_args.robot_ip)
-    if reachy.mobile_base is None:
-        print(f"[ERROR] No mobile base reported by the robot at '{cli_args.robot_ip}'")
-        reachy.disconnect()
-        sys.exit(1)
-    mobile_base = reachy.mobile_base
-    mobile_base.lidar.safety_enabled = True
-    mobile_base.lidar.safety_slowdown_distance = LIDAR_SLOWDOWN_DISTANCE
-    mobile_base.lidar.safety_critical_distance = LIDAR_CRITICAL_DISTANCE
-    mobile_base.turn_on()
-
-    cap = None
-    landmarker = None
-    try:
-        cap = cv2.VideoCapture(cli_args.cam)
-        if not cap.isOpened():
-            print(f"[ERROR] Cannot open camera {cli_args.cam}")
-            sys.exit(1)
-
-        landmarker_options = hand_landmarker.HandLandmarkerOptions(
-            base_options=base_options.BaseOptions(model_asset_path=cli_args.model),
-            running_mode=vision_task_running_mode.VisionTaskRunningMode.VIDEO,
-            num_hands=1,
-            min_hand_detection_confidence=0.7,
-            min_hand_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-        landmarker = hand_landmarker.HandLandmarker.create_from_options(landmarker_options)
-
-        bomi_map = BoMIMap()
-        samples = _calibration_phase(cap, landmarker)
-        bomi_map.fit(samples)
-        print("PCA map fitted")
-
-        _cursor_preview_phase(cap, landmarker, bomi_map)
-        _control_phase(cap, landmarker, bomi_map, mobile_base)
-    finally:
-        mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
-        mobile_base.send_speed_command()
-        if cap is not None:
-            cap.release()
-        cv2.destroyAllWindows()
-        if landmarker is not None:
-            landmarker.close()
-        reachy.disconnect()
-
-
-if __name__ == "__main__":
-    main()

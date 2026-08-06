@@ -20,32 +20,36 @@ webcam → MediaPipe → PCA cursor → 9-region velocity → reachy2_sdk (gRPC/
       torso depth camera → YOLOv8 → point cloud → grasp planning → arm execution
 ```
 
-- **`bomi_teleop.py`** — hand tracking → PCA cursor → 9-region velocity → mobile base. Standalone.
-- **`reachy_detection.py`** — torso camera → YOLOv8 detection → mouse-hover object selection → depth point cloud → grasp planning/execution. Standalone (mouse-driven, no BoMI cursor).
-- **`reachy_control.py`** — merges the two above into one BoMI-cursor-driven flow: drive the base, dwell to move the arms into a pre-grasping pose, then hover-select and grasp an object, all with the same hand-tracked cursor (no mouse anywhere).
-- **`reachy_grasp.py`** — grasp planning/execution library used by both `reachy_detection.py` and `reachy_control.py`: from an `ObjectGeometry` (position, axes, width/height, table normal), computes pre-grasp/grasp/lift end-effector poses and drives the arm through them. Not run directly.
-- **`graphs.py`** — matplotlib diagnostics (point cloud stages, planned grasp visualization) used by the above. Not run directly.
+`reachy_control.py` is the only script with a CLI/`main()` for real robot use — `bomi_teleop.py`, `reachy_detection.py`, `reachy_grasp.py`, `graphs.py`, `stream.py`, and `safety.py` are library modules it's built from. Every other way of running things (mouse-driven grasp, dry runs, single-piece diagnostics) lives under `tests/`, see Usage below.
+
+- **`bomi_teleop.py`** — hand tracking → PCA cursor → 9-region velocity building blocks (calibration/cursor-preview phases, the BoMI map, cursor filter, velocity helpers).
+- **`reachy_detection.py`** — torso camera → YOLOv8 detection → depth point cloud → grasp geometry building blocks (capture, hover-detection, point-cloud pipeline). The mouse-driven hover-select/confirm UI itself lives in `tests/test_grasp.py`; the BoMI-cursor-driven equivalent lives in `reachy_control.py`.
+- **`reachy_control.py`** — merges the two above into one BoMI-cursor-driven flow: drive the base, dwell to move the arms into a pre-grasping pose, then hover-select and grasp an object, all with the same hand-tracked cursor (no mouse anywhere). The real entry point.
+- **`reachy_grasp.py`** — grasp planning/execution library used by both `reachy_detection.py`'s and `reachy_control.py`'s flows: from an `ObjectGeometry` (position, axes, width/height, table normal), computes pre-grasp/grasp/lift end-effector poses and drives the arm through them.
+- **`graphs.py`** — matplotlib diagnostics (point cloud stages, planned grasp visualization).
+- **`stream.py`** — camera-streaming primitives (non-blocking grab+show, blocking live feed), parameterized by window name/quit-check so it has no dependency on the other modules.
+- **`safety.py`** — quit/shutdown safety net: a local `quit_requested` check (Q/ESC or window closed, while a cv2 window has focus) plus an OS-level global watcher (`pynput`, works regardless of focus, even mid-`arm.goto`) that triggers `emergency_shutdown`.
 
 ---
 
 ## Requirements
 
 - The real Reachy 2 robot reachable over the network, with its SDK server running (mobile base + arms + torso depth camera, depending on which script you run).
-- A webcam (for `bomi_teleop.py` / `reachy_control.py`).
+- A webcam (for `reachy_control.py`).
 - Python deps, in the same environment used to run the scripts:
 
 ```bash
 pip install reachy2-sdk mediapipe opencv-python scikit-learn numpy scipy ultralytics matplotlib open3d pynput
 ```
 
-`bomi_teleop.py` / `reachy_control.py` use the MediaPipe **Tasks API** (`HandLandmarker`), which needs a `hand_landmarker.task` model file — it's not bundled with the `mediapipe` pip package. Download it once and point `--model` at it (default: `hand_landmarker.task` at the package root):
+`reachy_control.py` uses the MediaPipe **Tasks API** (`HandLandmarker`), which needs a `hand_landmarker.task` model file — it's not bundled with the `mediapipe` pip package. Download it once and point `--model` at it (default: `hand_landmarker.task` at the package root):
 
 ```bash
 curl -o hand_landmarker.task \
   https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task
 ```
 
-`reachy_detection.py` / `reachy_control.py` use YOLOv8 (`ultralytics`) for object detection — `yolov8n.pt` (COCO-pretrained) is auto-downloaded on first run, or pass `--yolo-model` to use different weights.
+`reachy_control.py` uses YOLOv8 (`ultralytics`) for object detection — `yolov8n.pt` (COCO-pretrained) is auto-downloaded on first run, or pass `--yolo-model` to use different weights.
 
 No ROS 2 install is required to run these scripts (they only talk to the robot via `reachy2_sdk`). The package is still packaged as an `ament_python` ROS 2 package for convenience if you keep it in a ROS 2 workspace, but nothing in the runtime code imports `rclpy`.
 
@@ -69,26 +73,24 @@ Or just run the scripts directly with `python3` — no build step required, sinc
 
 ## Usage
 
-### Base teleop only — `bomi_teleop.py`
+### Full BoMI flow: teleop + grasp — `reachy_control.py`
+
+The real entry point — everything else in the package exists to support this.
 
 ```bash
-python3 reachy_bomi/bomi_teleop.py [robot_ip] [--model hand_landmarker.task] [--cam 0]
+python3 reachy_bomi/reachy_control.py [robot_ip] [--cam 0] [--model hand_landmarker.task] [--yolo-model yolov8n.pt] [--conf 0.5]
 # or, from a built ROS 2 workspace:
-ros2 run reachy_bomi bomi_teleop [robot_ip] [--model hand_landmarker.task] [--cam 0]
+ros2 run reachy_bomi reachy_control [robot_ip] [--cam 0] [--model hand_landmarker.task] [--yolo-model yolov8n.pt] [--conf 0.5]
 ```
 
-`robot_ip` is optional if you've set `DEFAULT_ROBOT_IP` in `bomi_teleop.py` to your robot's IP; otherwise pass it explicitly.
-
-Every run starts with calibration, then a cursor preview, then goes into control — the PCA map is only kept in memory for that run, not saved or reloaded.
+`robot_ip` is optional if you've set `DEFAULT_ROBOT_IP` in `reachy_control.py` to your robot's IP; otherwise pass it explicitly.
 
 **Phase 1 — Calibration** (always runs first): move your hand through all the positions you intend to use.
-`SPACE` records a sample, `ENTER` finishes (minimum 30 samples), `Q`/`Esc`/closing the window quits.
+`SPACE` records a sample, `ENTER` finishes (minimum 30 samples), `Q`/`Esc`/closing the window quits. The PCA map is only kept in memory for that run, not saved or reloaded.
 
-**Phase 2 — Cursor preview:** the same webcam and cursor-map windows used in Control are shown, but nothing is sent to the robot yet. Press `ENTER` to proceed into Control, or `Q`/`Esc`/close a window to quit.
+**Phase 2 — Cursor preview:** the same cursor-map window used in Control is shown, but nothing is sent to the robot yet — also where Reachy's torso camera live feed starts streaming (see `stream.py`). Press `ENTER` to proceed into Control, or `Q`/`Esc`/close a window to quit.
 
-**Phase 3 — Control:** your hand drives the cursor; the cursor position is mapped to base velocities and sent to the robot. Press `Q`/`Esc`, or close either window, to stop the robot and quit.
-
-The control area is a 3×3 grid with a dead zone in the centre:
+**Phase 3 — Control:** hand → PCA cursor → 9-region base velocity, mapped and sent to the robot. Hold the cursor centered (region 5) for `SELECTION_HOLD_SECONDS` straight to move the arms into a pre-grasping pose.
 
 ```
  1 | 2 | 3      center (5)          → stop
@@ -97,41 +99,23 @@ The control area is a 3×3 grid with a dead zone in the centre:
                 corners (1,3,7,9)   → linear + angular
 ```
 
-### Object detection + grasp only (mouse-driven) — `reachy_detection.py`
+**Phase 3.5 — Pre-grasping pose:** both arms bend to `PRE_GRASP_ELBOW_PITCH_DEG`, the base holds zero speed. The cursor/9-region map reappears but sends no speed commands; `ENTER` resumes Control at halved velocity. Hold the cursor centered again for `SELECTION_HOLD_SECONDS` to stop the base and open object selection (the torso camera live feed from Phase 2 closes here, since this phase opens its own).
 
-```bash
-python3 reachy_bomi/reachy_detection.py [robot_ip] [--yolo-model yolov8n.pt] [--conf 0.5]
-```
+**Phase 4 — Object selection / grasp:** capture → hover-select → Yes/No confirm → build point cloud → live feed checkpoint → plan → execute, every hover point being the BoMI cursor (mapped into the window's pixel space) instead of a mouse. "No" or quitting (`Q`/`Esc`/X) returns to Control.
 
-Turns the robot on, captures a frame from the torso camera, and runs YOLOv8 on it. Bounding boxes are blue by default; hover the mouse over one to turn it yellow, keep hovering `HOVER_HOLD_SECONDS` straight to confirm it (green) and get a Yes/No grasp prompt. On "Yes", builds the object's point cloud (10-frame depth fusion, table-plane + flying-pixel removal, largest-cluster isolation), plans a grasp (`reachy_grasp.plan_grasp`), and executes it (`reachy_grasp.execute_grasp`): open gripper → pre-grasp → grasp (straight line) → close gripper → lift.
+ESC/Q stop the robot from *any* window (including a `graphs.py` plot) or the terminal, at any point — see `safety.py`.
 
-`Q`, `Esc`, or closing the window = quit.
+### Everything else — `tests/`
 
-### Full BoMI flow: teleop + grasp — `reachy_control.py`
+Standalone scripts: dry runs, mouse-driven equivalents, and single-piece diagnostics, none of them needing the full calibration → teleop → grasp flow above to exercise one part of the pipeline:
 
-```bash
-python3 reachy_bomi/reachy_control.py [robot_ip] [--cam 0] [--model hand_landmarker.task] [--yolo-model yolov8n.pt] [--conf 0.5]
-```
-
-Same Phases 1–2 (Calibration, Cursor preview) as `bomi_teleop.py`, then:
-
-**Phase 3 — Control:** hand → PCA cursor → 9-region base velocity, as above. Hold the cursor centered (region 5) for `SELECTION_HOLD_SECONDS` straight to move the arms into a pre-grasping pose.
-
-**Phase 3.5 — Pre-grasping pose:** both arms bend to `PRE_GRASP_ELBOW_PITCH_DEG`, the base holds zero speed. The cursor/9-region map reappears but sends no speed commands; `ENTER` resumes Control at halved velocity. Hold the cursor centered again for `SELECTION_HOLD_SECONDS` to stop the base and open object selection.
-
-**Phase 4 — Object selection / grasp:** same capture → hover-select → Yes/No confirm flow as `reachy_detection.py`, except every hover point is the BoMI cursor (mapped into the window's pixel space), not the mouse. "No" or quitting (`Q`/`Esc`/X) returns to Control.
-
-### Diagnostics — `tests/`
-
-Standalone scripts, none of them import `bomi_teleop`/`reachy_detection`/`reachy_control` together — each isolates one piece of the pipeline to debug it independently:
-
-| Script | What it checks |
+| Script | What it does |
 |---|---|
 | `test_teleop.py` | `bomi_teleop.py`'s hand-tracking → velocity pipeline, logged instead of sent (no robot needed) |
-| `test_reachy_control.py` | `reachy_control.py`'s calibration → cursor → pre-grasping-pose flow, fully self-contained (no robot, no depth camera, no YOLO) |
+| `test_navigation.py` | `reachy_control.py`'s calibration → cursor → pre-grasping-pose flow, fully self-contained (no robot, no depth camera, no YOLO) |
 | `test_object_dimensions.py` | Live YOLO + depth size estimation only (robot arms/base never power on) |
 | `test_reachability.py` | Whether a single pasted 4×4 end-effector pose is IK-reachable for one arm, and moves there if so — isolates a rejection from the rest of the grasp-planning pipeline |
-| `test_grasp.py` | The same select → plan → execute grasp flow as `reachy_detection.py`, starting both arms directly in the `elbow_135` posture |
+| `test_grasp.py` | Mouse-driven select → confirm → plan → execute grasp flow (the counterpart to `reachy_control.py`'s BoMI-cursor-driven Phase 4), starting both arms directly in the `elbow_135` posture |
 
 ---
 
@@ -141,12 +125,14 @@ Standalone scripts, none of them import `bomi_teleop`/`reachy_detection`/`reachy
 reachy_bomi/
 ├── reachy_bomi/                     # Python package
 │   ├── __init__.py
-│   ├── bomi_teleop.py               # webcam/MediaPipe → PCA cursor → reachy2_sdk mobile base
-│   ├── reachy_detection.py          # torso camera → YOLOv8 → mouse hover-select → point cloud → grasp
-│   ├── reachy_grasp.py              # grasp planning/execution library (pose math, IK search, execute_grasp)
-│   ├── reachy_control.py            # merges bomi_teleop + reachy_detection under one BoMI cursor
-│   ├── graphs.py                    # matplotlib diagnostics (point cloud stages, grasp plan visualization)
-│   └── tests/                       # standalone diagnostic/dry-run scripts, see Usage above
+│   ├── reachy_control.py            # THE entry point: merges bomi_teleop + reachy_detection under one BoMI cursor
+│   ├── bomi_teleop.py               # library: webcam/MediaPipe → PCA cursor → 9-region velocity building blocks
+│   ├── reachy_detection.py          # library: torso camera → YOLOv8 → point cloud → grasp geometry building blocks
+│   ├── reachy_grasp.py              # library: grasp planning/execution (pose math, IK search, execute_grasp)
+│   ├── graphs.py                    # library: matplotlib diagnostics (point cloud stages, grasp plan visualization)
+│   ├── stream.py                    # library: camera-streaming primitives (torso + teleop cameras)
+│   ├── safety.py                    # library: quit/shutdown safety net (local check + OS-level global watcher)
+│   └── tests/                       # standalone scripts (mouse-driven grasp, dry runs, diagnostics), see Usage above
 ├── hand_landmarker.task              # MediaPipe model (download separately, see Requirements)
 ├── yolov8n.pt                        # YOLOv8 weights (auto-downloaded by ultralytics on first run)
 ├── resource/
@@ -159,6 +145,6 @@ reachy_bomi/
 ```
 
 ## Known limitations
-- Requires a functioning webcam on the machine running `bomi_teleop.py`/`reachy_control.py`.
+- Requires a functioning webcam on the machine running `reachy_control.py` (or the teleop-only `tests/test_teleop.py`).
 - Grasp planning only handles round objects (`cylinder`/`sphere` shapes in `reachy_detection.SHAPE_BY_CLASS`) — a box's hidden depth can't be recovered from a single camera view the same way.
 - The operator's PC and the robot just need network (IP) reachability to each other — no ROS 2 distro matching is required, since communication goes through `reachy2_sdk`'s gRPC interface.

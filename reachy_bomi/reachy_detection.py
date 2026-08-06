@@ -1,46 +1,34 @@
 #!/usr/bin/env python3
 """
-BoMI grasp for Reachy2: turns the robot on, captures a single frame from the
-torso camera at launch, runs YOLOv8 on it to spot graspable objects, and
-(when depth is available at the object's center pixel) estimates its 3D
-position in Reachy's coordinate system, over reachy2_sdk (gRPC/IP).
+BoMI grasp building blocks for Reachy2: YOLOv8 detection on the torso
+camera, depth point-cloud pipeline (frame fusion, distortion correction,
+table-plane/flying-pixel removal, shape-specific dimension/pose fit), over
+reachy2_sdk (gRPC/IP).
 
-Dependencies:
-    pip install reachy2-sdk opencv-python numpy ultralytics matplotlib open3d
+Library module, no CLI of its own -- reachy_control.py is the real entry
+point and imports these pieces (_capture_and_detect, _build_object_point_cloud,
+drawing/hover-detection helpers). For the mouse-driven select/confirm flow
+(no BoMI cursor), see tests/test_grasp.py; for a live size-estimation
+diagnostic, see tests/test_object_dimensions.py.
 
-Usage:
-    python3 reachy_detection.py [robot_ip]
-
-    <robot_ip> is optional; if omitted, DEFAULT_ROBOT_IP (set in this file) is used.
-
-    Options:
-        --yolo-model PATH   YOLOv8 weights (.pt). Default: yolov8n.pt (COCO
-                             pretrained, auto-downloaded by ultralytics on
-                             first run).
-        --conf FLOAT        Minimum detection confidence. Default: 0.5
-
-    Bounding boxes are blue by default. Hover the mouse over one to turn it
-    yellow. Keep hovering the same object for HOVER_HOLD_SECONDS straight and
-    it turns green, hiding the other boxes.
-
-    Q, ESC, or closing the window with the X = quit.
+Bounding boxes are blue by default. Hovering one for HOVER_HOLD_SECONDS
+straight turns it green (see _find_hovered_detection/COLOR_*).
 """
 
-import argparse
-import sys
 import time
 from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 import open3d as o3d
-from reachy2_sdk import ReachySDK
 from reachy2_sdk.media.camera import CameraView, DepthCamera
 from reachy2_sdk.utils.utils import invert_affine_transformation_matrix
 from ultralytics import YOLO
 
 import graphs
 import reachy_grasp
+import safety
+import stream
 
 # Placeholder — replace with the robot's actual IP.
 DEFAULT_ROBOT_IP = "192.168.0.121"
@@ -106,17 +94,6 @@ YES_BUTTON_BOX: Box = (60, 150, 240, 220)
 NO_BUTTON_BOX: Box = (280, 150, 460, 220)
 COLOR_YES = (0, 200, 0)
 COLOR_NO = (0, 0, 255)
-
-
-def _quit_requested(key: int, window_name: str) -> bool:
-    """True if Q/ESC was pressed, or the window was closed with the X button."""
-    if key in (ord('q'), ord('Q'), 27):
-        return True
-    try:
-        return cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1
-    except cv2.error:
-        return False
-
 
 class _MouseTracker:
     """Tracks the latest mouse position over the given OpenCV window."""
@@ -260,52 +237,9 @@ def _draw_confirm_canvas(class_name: str, yes_progress: float, no_progress: floa
     return canvas
 
 
-def _confirm_grasp(class_name: str) -> Optional[bool]:
-    """Blocking Yes/No dialog. Returns True (Yes), False (No), or None if the user quit."""
-    mouse = _MouseTracker(CONFIRM_WINDOW_NAME)
-    yes_hover_start: Optional[float] = None
-    no_hover_start: Optional[float] = None
-
-    while True:
-        now = time.time()
-        on_yes = _box_contains(YES_BUTTON_BOX, mouse.x, mouse.y)
-        on_no = _box_contains(NO_BUTTON_BOX, mouse.x, mouse.y)
-
-        yes_hover_start = (yes_hover_start or now) if on_yes else None
-        no_hover_start = (no_hover_start or now) if on_no else None
-
-        yes_progress = min((now - yes_hover_start) / CONFIRM_HOVER_SECONDS, 1.0) if yes_hover_start else 0.0
-        no_progress = min((now - no_hover_start) / CONFIRM_HOVER_SECONDS, 1.0) if no_hover_start else 0.0
-
-        cv2.imshow(CONFIRM_WINDOW_NAME, _draw_confirm_canvas(class_name, yes_progress, no_progress))
-
-        key = cv2.waitKey(1) & 0xFF
-        result: Optional[bool] = None
-        quit_now = _quit_requested(key, CONFIRM_WINDOW_NAME)
-        if yes_progress >= 1.0:
-            result = True
-        elif no_progress >= 1.0:
-            result = False
-
-        if quit_now or result is not None:
-            cv2.destroyWindow(CONFIRM_WINDOW_NAME)
-            return None if quit_now else result
-
-
 def _stream_torso_camera(depth_cam: DepthCamera) -> None:
     """Plain live RGB feed from the torso camera, no detection."""
-    print("\n=== LIVE RGB STREAM (no detection) ===  Q = quit")
-    while True:
-        result = depth_cam.get_frame(view=CameraView.LEFT)
-        if result is None:
-            continue
-        frame, _timestamp = result
-
-        cv2.imshow(CAM_WINDOW_NAME, frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if _quit_requested(key, CAM_WINDOW_NAME):
-            break
+    stream.stream_blocking(depth_cam, CAM_WINDOW_NAME, safety.quit_requested)
 
 
 Capture = Tuple[np.ndarray, List[Detection], dict]
@@ -329,73 +263,6 @@ def _capture_and_detect(depth_cam: DepthCamera, model: YOLO, confidence: float) 
         for class_name, conf, box in detections
     }
     return base_frame, detections, labels
-
-
-def _select_object_to_grasp(
-    depth_cam: DepthCamera, model: YOLO, confidence: float, captured: Capture,
-) -> Tuple[Optional[str], Optional[Box], Capture]:
-    """Detect-and-hover loop on an already-captured frame. Returns the class name and its box
-    once held green for HOVER_HOLD_SECONDS (or None, None if the user quit), plus the
-    possibly-refreshed (frame, detections, labels), so a later re-entry (e.g. after answering
-    "No") can reuse them without recapturing."""
-    base_frame, detections, labels = captured
-
-    mouse = _MouseTracker(CAM_WINDOW_NAME)
-    hovered_box: Optional[Box] = None
-    hover_start: Optional[float] = None
-    button_hover_start: Optional[float] = None
-
-    print(f"\n=== CAPTURED FRAME (RGB + YOLO) ===  Q = quit  |  "
-          f"hover Refresh for {REFRESH_HOVER_SECONDS:.0f}s to recapture")
-    while True:
-        now = time.time()
-        on_button = _box_contains(REFRESH_BUTTON_BOX, mouse.x, mouse.y)
-        if not on_button:
-            button_hover_start = None
-        elif button_hover_start is None:
-            button_hover_start = now
-        elif now - button_hover_start >= REFRESH_HOVER_SECONDS:
-            refreshed = _capture_and_detect(depth_cam, model, confidence)
-            if refreshed is not None:
-                base_frame, detections, labels = refreshed
-            hovered_box, hover_start = None, None
-            button_hover_start = None
-
-        frame = base_frame.copy()
-
-        hovered = _find_hovered_detection(detections, mouse.x, mouse.y)
-
-        if hovered is None:
-            hovered_box, hover_start = None, None
-        else:
-            box = hovered[2]
-            if hovered_box is None or _iou(box, hovered_box) < HOVER_IOU_MATCH:
-                hover_start = now
-            hovered_box = box
-        hover_duration = (now - hover_start) if hover_start is not None else 0.0
-
-        is_held = hovered is not None and hover_duration >= HOVER_HOLD_SECONDS
-
-        if is_held:
-            box = hovered[2]
-            _draw_box(frame, box, labels[box], COLOR_GREEN)
-            cv2.imshow(CAM_WINDOW_NAME, frame)
-            cv2.waitKey(1)
-            return hovered[0], box, (base_frame, detections, labels)
-
-        hover_progress = min(hover_duration / HOVER_HOLD_SECONDS, 1.0) if hovered is not None else 0.0
-        for class_name, conf, box in detections:
-            is_hovered = hovered is not None and box == hovered[2]
-            color = COLOR_YELLOW if is_hovered else COLOR_BLUE
-            _draw_box(frame, box, labels[box], color, hover_progress if is_hovered else 0.0)
-
-        button_progress = min((now - button_hover_start) / REFRESH_HOVER_SECONDS, 1.0) if button_hover_start else 0.0
-        _draw_refresh_button(frame, button_progress)
-        cv2.imshow(CAM_WINDOW_NAME, frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if _quit_requested(key, CAM_WINDOW_NAME):
-            return None, None, (base_frame, detections, labels)
 
 
 # --- Point cloud pipeline (first step towards an actual grasp pose) ---
@@ -676,7 +543,7 @@ def _build_object_point_cloud(
             depth_stack.append(_crop_depth_to_box(depth_frame, padded_box))
 
         key = cv2.waitKey(1) & 0xFF
-        if _quit_requested(key, CAM_WINDOW_NAME):
+        if safety.quit_requested(key, CAM_WINDOW_NAME):
             return None
 
     fused_crop = _fuse_depth_frames(depth_stack)
@@ -689,10 +556,10 @@ def _build_object_point_cloud(
     # not needed for normal runs (the printed counts + table normal verdict
     # cover it), but handy for e.g. thesis figures. Uncomment to show.
     # raw_cloud = _depth_crop_to_point_cloud(depth_cam, fused_crop, padded_box, correct_distortion=False)
-    # graphs.show_point_cloud(raw_cloud, f"{class_name} - 1 acquisita")
+    # graphs.show_point_cloud(raw_cloud, f"{class_name} - 1 acquired")
 
     point_cloud = _depth_crop_to_point_cloud(depth_cam, fused_crop, padded_box)
-    # graphs.show_point_cloud(point_cloud, f"{class_name} - 2 dopo rimozione distorsione")
+    # graphs.show_point_cloud(point_cloud, f"{class_name} - 2 after removing distortion")
 
     points_before_isolation = len(point_cloud)
     point_cloud = _remove_flying_pixels(point_cloud)
@@ -704,12 +571,12 @@ def _build_object_point_cloud(
               f"{tilt_deg:.0f} deg from vertical  [{verdict}]")
     else:
         print("Table normal: not fitted (too few points) -- reachy_grasp will fall back to a vertical assumption")
-    # graphs.show_point_cloud(point_cloud, f"{class_name} - 3 dopo isolamento background")
+    # graphs.show_point_cloud(point_cloud, f"{class_name} - 3 after background isolation")
 
     point_cloud = _largest_cluster(point_cloud)
     print(f"Point cloud: {points_before_isolation} points (distortion-corrected) -> "
           f"{len(point_cloud)} (table + flying pixels removed, largest cluster kept)")
-    # graphs.show_point_cloud(point_cloud, f"{class_name} - 4 finale")
+    # graphs.show_point_cloud(point_cloud, f"{class_name} - 4 final")
 
     shape = shape_from_class(class_name)
     width_m, height_m, centroid, axes = _object_dimensions(point_cloud, shape)
@@ -724,70 +591,3 @@ def _build_object_point_cloud(
     )
 
 
-def _show_torso_camera(reachy: ReachySDK, model: YOLO, confidence: float) -> None:
-    depth_cam = reachy.cameras.depth
-    if depth_cam is None:
-        print("[ERROR] No depth camera reported by the robot")
-        return
-
-    captured = _capture_and_detect(depth_cam, model, confidence)
-    if captured is None:
-        return
-
-    while True:
-        class_name, box, captured = _select_object_to_grasp(depth_cam, model, confidence, captured)
-        if class_name is None:
-            break
-
-        decision = _confirm_grasp(class_name)
-        if decision is None:
-            break
-        if decision:
-            geometry = _build_object_point_cloud(depth_cam, class_name, box)
-            if geometry is not None:
-                print(f"[{class_name}] estimated width={geometry.width_m * 100:.1f}cm  "
-                      f"height={geometry.height_m * 100:.1f}cm")
-                plan = reachy_grasp.plan_grasp(reachy, geometry)
-                if plan is None:
-                    print(f"[{class_name}] no feasible grasp (too wide for the gripper, "
-                          "or its pose couldn't be estimated)")
-                else:
-                    graphs.show_grasp_plan(geometry, plan)
-                    reachy_grasp.execute_grasp(reachy, plan)
-                _stream_torso_camera(depth_cam)
-            break
-        # No -> back to the same captured frame/detections, all blue again
-
-    cv2.destroyWindow(CAM_WINDOW_NAME)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="BoMI grasp for Reachy2")
-    parser.add_argument("robot_ip", nargs="?", default=DEFAULT_ROBOT_IP,
-                        help=f"IP address of the Reachy robot (default: {DEFAULT_ROBOT_IP})")
-    parser.add_argument("--yolo-model", default=YOLO_MODEL_PATH,
-                        help=f"Path to YOLOv8 weights (default: {YOLO_MODEL_PATH})")
-    parser.add_argument("--conf", type=float, default=YOLO_CONFIDENCE,
-                        help=f"Minimum detection confidence (default: {YOLO_CONFIDENCE})")
-    cli_args = parser.parse_args()
-
-    reachy = ReachySDK(host=cli_args.robot_ip)
-    if reachy.cameras is None:
-        print(f"[ERROR] No camera service reported by the robot at '{cli_args.robot_ip}'")
-        reachy.disconnect()
-        sys.exit(1)
-
-    reachy.turn_on()
-
-    print(f"Loading YOLO model '{cli_args.yolo_model}'...")
-    model = YOLO(cli_args.yolo_model)
-
-    try:
-        _show_torso_camera(reachy, model, cli_args.conf)
-    finally:
-        cv2.destroyAllWindows()
-        reachy.disconnect()
-
-
-if __name__ == "__main__":
-    main()

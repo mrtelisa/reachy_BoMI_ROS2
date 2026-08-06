@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-Test/dry-run version of bomi_teleop.py: same hand-tracking -> velocity
-pipeline, but instead of sending anything to the robot, it just logs the
+Test/dry-run version of bomi_teleop.py's building blocks (the same ones
+reachy_control.py's Control phase is built from): hand-tracking -> velocity
+pipeline, but instead of sending anything to a robot, it just logs the
 lin_vel/ang_vel that *would* be sent. No reachy2_sdk connection, no robot
-required — use this to sanity-check the computed velocities before running
-the real bomi_teleop.py against the robot.
+required -- use this to sanity-check the computed velocities before running
+the real reachy_control.py against the robot. Entirely self-contained (a
+deliberate copy, not an import -- bomi_teleop.py can't be imported without
+reachy2_sdk being installed, see its module docstring), so constants that
+need to match the real ones say so.
 
 Dependencies:
     pip install mediapipe opencv-python scikit-learn numpy scipy
@@ -25,16 +29,17 @@ Phase 1 - Calibration (always runs first):
 Phase 2 - Cursor preview:
     Same cursor/region view as Control, but no velocity is computed or logged.
     Get a feel for the cursor before control starts.
-    Opens the same cam/map windows used by Control; they stay open across the
+    Opens the same map window used by Control; it stays open across the
     ENTER press below rather than closing and reopening.
     ENTER = proceed to Control   |   Q, ESC, or closing a window = quit
 
 Phase 3 - Control:
     Hand movement -> PCA cursor -> 9-region velocity -> logged, not sent.
-    Opens two windows: the webcam feed with landmarks, and a map of the
-    virtual screen with the 9-region grid lines and a dot at the current
-    cursor position.
-    Q, ESC, or closing a window with the X = quit.
+    Opens a map of the virtual screen with the 9-region grid lines and a
+    dot at the current cursor position (no separate raw webcam window,
+    matching reachy_control.py -- the hand-tracking frame is used but
+    never displayed there either).
+    Q, ESC, or closing the window with the X = quit.
 """
 
 import argparse
@@ -58,7 +63,7 @@ HAND_CONNECTIONS = hand_landmarker.HandLandmarksConnections.HAND_CONNECTIONS
 BASE_WIDTH = 2550
 BASE_HEIGHT = 1500
 
-MAX_LINEAR = 1.0      # m/s
+MAX_LINEAR = 0.8      # m/s -- KEEP IN SYNC with bomi_teleop.MAX_LINEAR
 MAX_ANGULAR = 0.8     # rad/s
 DEAD_ZONE_PX = 200    # pixel radius around screen center before motion starts
 
@@ -72,12 +77,11 @@ CURSOR_FILTER_CUTOFF_HZ = 4.0  # cutoff frequency
 
 # MediaPipe Tasks hand-landmarker model (.task), lives at the package root by default.
 DEFAULT_MODEL_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "hand_landmarker.task"
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "hand_landmarker.task"
 )
 
-# Shared window names for the cursor preview and control phases, so the same
-# OS windows stay open across the transition instead of closing and reopening.
-CAM_WINDOW_NAME = "BoMI - Camera (TEST)"
+# Shared window name for the cursor preview and control phases, so the same
+# OS window stays open across the transition instead of closing and reopening.
 MAP_WINDOW_NAME = "BoMI - Cursor Map (TEST)"
 
 
@@ -354,7 +358,6 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap) -> None:
     where it starts out before control begins.
     """
     cursor_filter = CursorFilter()
-    cam_window = CAM_WINDOW_NAME
     map_window = MAP_WINDOW_NAME
 
     crs_x, crs_y = BASE_WIDTH / 2.0, BASE_HEIGHT / 2.0
@@ -380,22 +383,12 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap) -> None:
             crs_x, crs_y = cursor_filter.update(crs_x, crs_y)
             region = check_region_cursor(crs_x, crs_y)
 
-        cv2.putText(
-            frame, f"region={region}  cursor=({crs_x:.0f},{crs_y:.0f})",
-            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
-        )
-        cv2.putText(
-            frame, "PREVIEW - nothing logged. ENTER=start control  Q=quit",
-            (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2,
-        )
-
-        cv2.imshow(cam_window, frame)
         cv2.imshow(map_window, _draw_cursor_map(crs_x, crs_y, region, "(preview - not computed)"))
 
         key = cv2.waitKey(1) & 0xFF
         if key == 13:  # ENTER
             break
-        if _quit_requested(key, cam_window) or _quit_requested(key, map_window):
+        if _quit_requested(key, map_window):
             print("Aborted.")
             sys.exit(0)
 
@@ -407,7 +400,6 @@ def _control_phase(cap, landmarker, bomi_map: BoMIMap) -> None:
     dt = 1.0 / PUBLISH_HZ
     last_publish = time.time()
     cursor_filter = CursorFilter()
-    cam_window = CAM_WINDOW_NAME
     map_window = MAP_WINDOW_NAME
 
     # Start centered (region 5) until the first hand detection updates it.
@@ -438,15 +430,6 @@ def _control_phase(cap, landmarker, bomi_map: BoMIMap) -> None:
             lin_vel, ang_vel = compute_dynamic_vel_from_cursor(crs_x, crs_y)
             lin_vel, ang_vel = apply_region_velocity_mask(region, lin_vel, ang_vel)
 
-            cv2.putText(
-                frame, f"region={region}  cursor=({crs_x:.0f},{crs_y:.0f})",
-                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
-            )
-            cv2.putText(
-                frame, f"-> (test) would send: {message}",
-                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
-            )
-
         now = time.time()
         if now - last_publish >= dt:
             message = f"lin_vel:{lin_vel:.3f} ang_vel:{ang_vel:.3f}"
@@ -455,15 +438,13 @@ def _control_phase(cap, landmarker, bomi_map: BoMIMap) -> None:
                   f"({math.degrees(ang_vel):+.3f} deg/s)   region={region}")
             last_publish = now
 
-        cv2.imshow(cam_window, frame)
         cv2.imshow(map_window, _draw_cursor_map(crs_x, crs_y, region, message))
 
         key = cv2.waitKey(1) & 0xFF
-        if _quit_requested(key, cam_window) or _quit_requested(key, map_window):
+        if _quit_requested(key, map_window):
             break
 
     print("[TEST] lin_vel=+0.000 m/s   ang_vel=+0.000 rad/s (+0.000 deg/s)   stop")
-    cv2.destroyWindow(cam_window)
     cv2.destroyWindow(map_window)
 
 

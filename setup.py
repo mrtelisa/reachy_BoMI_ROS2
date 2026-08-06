@@ -18,7 +18,7 @@ setup(
     license='TODO: License declaration',
     entry_points={
         'console_scripts': [
-            'bomi_teleop = reachy_bomi.bomi_teleop:main',
+            'reachy_control = reachy_bomi.reachy_control:main',
         ],
     },
 )
