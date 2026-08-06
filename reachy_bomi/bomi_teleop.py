@@ -45,8 +45,14 @@ LIDAR_CRITICAL_DISTANCE = 0.55  # m
 BASE_WIDTH = 2550
 BASE_HEIGHT = 1500
 
-MAX_LINEAR = 0.8     # m/s
-MAX_ANGULAR = 0.8     # rad/s
+# Below MIN_LINEAR/MIN_ANGULAR the mobile base's wheels don't overcome
+# their own resistance and simply don't move -- so once a component leaves
+# its dead zone it ramps from min_* (at the dead-zone edge) straight to
+# max_* (at the screen edge), not from 0.
+MIN_LINEAR = 0.18      # m/s
+MAX_LINEAR = 0.5      # m/s
+MIN_ANGULAR = 0.67     # rad/s
+MAX_ANGULAR = 1.1     # rad/s
 DEAD_ZONE_PX = 200    # pixel radius around screen center before motion starts
 
 PUBLISH_HZ = 20  # speed-command rate (Hz) — comfortably under the mobile base's 0.2s command duration
@@ -98,17 +104,36 @@ def check_region_cursor(crs_x: float, crs_y: float) -> int:
     return row * 3 + col + 1
 
 
+def _ramped_axis_velocity(delta: float, half_extent: float, dead_zone_px: float, min_v: float, max_v: float) -> float:
+    """Signed velocity for one axis: 0 inside dead_zone_px of center, then
+    ramps linearly from min_v (right at the dead-zone edge) to max_v (at
+    the screen edge) -- not from 0, since below min_v the wheels don't
+    move at all (see MIN_LINEAR/MIN_ANGULAR)."""
+    norm = delta / half_extent
+    dead_zone_norm = dead_zone_px / half_extent
+    magnitude = abs(norm)
+    if magnitude <= dead_zone_norm:
+        return 0.0
+    t = min((magnitude - dead_zone_norm) / (1.0 - dead_zone_norm), 1.0)
+    sign = 1.0 if norm > 0 else -1.0
+    return sign * (min_v + t * (max_v - min_v))
+
+
 def compute_dynamic_vel_from_cursor(
     crs_x: float,
     crs_y: float,
+    min_linear: float = MIN_LINEAR,
     max_linear: float = MAX_LINEAR,
+    min_angular: float = MIN_ANGULAR,
     max_angular: float = MAX_ANGULAR,
     dead_zone_px: float = DEAD_ZONE_PX,
     ang_right_is_negative: bool = True,
 ) -> tuple:
     """
-    Continuous linear/angular velocity from cursor position.
-    Cursor at screen center -> zero velocity (dead zone).
+    Linear/angular velocity from cursor position, each axis independent
+    (so a corner region gets both ramps at once): 0 inside dead_zone_px of
+    screen center on that axis, then min_*..max_* linearly from there to
+    the screen edge -- see _ramped_axis_velocity.
     Up from center -> positive linear; right from center -> negative angular.
     """
     cx = BASE_WIDTH / 2.0
@@ -116,20 +141,9 @@ def compute_dynamic_vel_from_cursor(
     dx = crs_x - cx
     dy = crs_y - cy
 
-    if np.hypot(dx, dy) < dead_zone_px:
-        return 0.0, 0.0
-
-    x_norm = float(np.clip(dx / cx, -1.0, 1.0))
-    y_norm = float(np.clip(-dy / cy, -1.0, 1.0))  # up = positive
-
-    if abs(x_norm) < dead_zone_px / cx:
-        x_norm = 0.0
-    if abs(y_norm) < dead_zone_px / cy:
-        y_norm = 0.0
-
-    lin_vel = max_linear * y_norm
+    lin_vel = _ramped_axis_velocity(-dy, cy, dead_zone_px, min_linear, max_linear)  # up = positive
     ang_sign = -1.0 if ang_right_is_negative else 1.0
-    ang_vel = ang_sign * max_angular * x_norm
+    ang_vel = ang_sign * _ramped_axis_velocity(dx, cx, dead_zone_px, min_angular, max_angular)
     return lin_vel, ang_vel
 
 

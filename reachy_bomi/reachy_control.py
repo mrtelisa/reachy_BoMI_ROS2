@@ -89,7 +89,7 @@ PRE_GRASP_MOVE_DURATION = 5.0  # seconds, arm goto duration into the pre-graspin
 
 # Linear/angular velocity multiplier for Control once the arms are in the
 # pre-grasping pose, so driving up to the object is finer-grained.
-HALVED_SPEED_FACTOR = 0.7 # TODO: find a good parameter to set
+HALVED_SPEED_FACTOR = 0.75 # max_lin = 0.375 [m/s], max_ang = 0.825 [rad/s] 
 
 TORSO_CAM_WINDOW_NAME = "BoMI - Torso Camera (LEFT)"
 
@@ -420,10 +420,16 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
 
         if hand_detected:
             region = teleop.check_region_cursor(crs_x, crs_y)
-            lin_vel, ang_vel = teleop.compute_dynamic_vel_from_cursor(crs_x, crs_y)
+            # speed_scale narrows the range (smaller max) without touching
+            # the min -- see _goto_pre_grasp_pose's HALVED_SPEED_FACTOR use
+            # below; multiplying the computed velocity instead would also
+            # shrink the min, defeating the point of having one.
+            lin_vel, ang_vel = teleop.compute_dynamic_vel_from_cursor(
+                crs_x, crs_y,
+                max_linear=teleop.MAX_LINEAR * speed_scale,
+                max_angular=teleop.MAX_ANGULAR * speed_scale,
+            )
             lin_vel, ang_vel = teleop.apply_region_velocity_mask(region, lin_vel, ang_vel)
-            lin_vel *= speed_scale
-            ang_vel *= speed_scale
         else:
             lin_vel, ang_vel = 0.0, 0.0
 
