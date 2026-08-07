@@ -196,7 +196,7 @@ def _draw_hand_landmarks(frame, landmarks) -> None:
 
 
 def _draw_cursor_map(crs_x: float, crs_y: float, region: int, message: str,
-                      map_width: int = 425, map_height: int = 250):
+                      map_width: int = 638, map_height: int = 375):
     """Rectangle representing the BASE_WIDTH x BASE_HEIGHT virtual screen, with
     the 9-region grid lines, a dot at the current cursor position, and the
     lin_vel/ang_vel message currently being sent to the mobile base."""
@@ -212,7 +212,7 @@ def _draw_cursor_map(crs_x: float, crs_y: float, region: int, message: str,
         cv2.line(canvas, (0, y), (map_width, y), (90, 90, 90), 1)
 
     cx, cy = int(crs_x * sx), int(crs_y * sy)
-    cv2.circle(canvas, (cx, cy), 10, (0, 0, 255), -1)
+    cv2.circle(canvas, (cx, cy), 8, (0, 0, 255), -1)
 
     cv2.putText(canvas, f"region={region}  cursor=({crs_x:.0f},{crs_y:.0f})",
                 (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
