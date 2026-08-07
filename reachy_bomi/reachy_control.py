@@ -80,7 +80,7 @@ from reachy2_sdk import ReachySDK
 from ultralytics import YOLO
 
 import graphs
-import reachy_detection as grasp
+import reachy_detection
 import reachy_grasp
 import safety
 import bomi_teleop as teleop
@@ -235,7 +235,7 @@ def _select_object_to_grasp_bomi(
     button_hover_start = None
 
     print(f"\n=== CAPTURED FRAME (RGB + YOLO) ===  Q = quit  |  "
-          f"hold Refresh for {grasp.REFRESH_HOVER_SECONDS:.0f}s to recapture")
+          f"hold Refresh for {reachy_detection.REFRESH_HOVER_SECONDS:.0f}s to recapture")
 
     while True:
         _, crs_x, crs_y, _ = _update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
@@ -243,13 +243,13 @@ def _select_object_to_grasp_bomi(
         gx, gy = _map_bomi_to_frame(crs_x, crs_y, frame_w, frame_h)
         now = time.time()
 
-        on_button = grasp._box_contains(grasp.REFRESH_BUTTON_BOX, gx, gy)
+        on_button = reachy_detection._box_contains(reachy_detection.REFRESH_BUTTON_BOX, gx, gy)
         if not on_button:
             button_hover_start = None
         elif button_hover_start is None:
             button_hover_start = now
-        elif now - button_hover_start >= grasp.REFRESH_HOVER_SECONDS:
-            refreshed = grasp._capture_and_detect(depth_cam, model, confidence, reachy=reachy)
+        elif now - button_hover_start >= reachy_detection.REFRESH_HOVER_SECONDS:
+            refreshed = reachy_detection._capture_and_detect(depth_cam, model, confidence, reachy=reachy)
             if refreshed is not None:
                 base_frame, detections, labels = refreshed
                 frame_h, frame_w = base_frame.shape[:2]
@@ -257,39 +257,39 @@ def _select_object_to_grasp_bomi(
             button_hover_start = None
 
         frame = base_frame.copy()
-        hovered = grasp._find_hovered_detection(detections, gx, gy)
+        hovered = reachy_detection._find_hovered_detection(detections, gx, gy)
 
         if hovered is None:
             hovered_box, hover_start = None, None
         else:
             box = hovered[2]
-            if hovered_box is None or grasp._iou(box, hovered_box) < grasp.HOVER_IOU_MATCH:
+            if hovered_box is None or reachy_detection._iou(box, hovered_box) < reachy_detection.HOVER_IOU_MATCH:
                 hover_start = now
             hovered_box = box
         hover_duration = (now - hover_start) if hover_start is not None else 0.0
-        is_held = hovered is not None and hover_duration >= grasp.HOVER_HOLD_SECONDS
+        is_held = hovered is not None and hover_duration >= reachy_detection.HOVER_HOLD_SECONDS
 
         if is_held:
             box = hovered[2]
-            grasp._draw_box(frame, box, labels[box], grasp.COLOR_GREEN)
+            reachy_detection._draw_box(frame, box, labels[box], reachy_detection.COLOR_GREEN)
             _draw_bomi_cursor(frame, gx, gy)
-            cv2.imshow(grasp.CAM_WINDOW_NAME, frame)
+            cv2.imshow(reachy_detection.CAM_WINDOW_NAME, frame)
             cv2.waitKey(1)
             return hovered[0], box, (base_frame, detections, labels), crs_x, crs_y
 
-        hover_progress = min(hover_duration / grasp.HOVER_HOLD_SECONDS, 1.0) if hovered is not None else 0.0
+        hover_progress = min(hover_duration / reachy_detection.HOVER_HOLD_SECONDS, 1.0) if hovered is not None else 0.0
         for class_name, conf, box in detections:
             is_hovered = hovered is not None and box == hovered[2]
-            color = grasp.COLOR_YELLOW if is_hovered else grasp.COLOR_BLUE
-            grasp._draw_box(frame, box, labels[box], color, hover_progress if is_hovered else 0.0)
+            color = reachy_detection.COLOR_YELLOW if is_hovered else reachy_detection.COLOR_BLUE
+            reachy_detection._draw_box(frame, box, labels[box], color, hover_progress if is_hovered else 0.0)
 
-        button_progress = min((now - button_hover_start) / grasp.REFRESH_HOVER_SECONDS, 1.0) if button_hover_start else 0.0
-        grasp._draw_refresh_button(frame, button_progress)
+        button_progress = min((now - button_hover_start) / reachy_detection.REFRESH_HOVER_SECONDS, 1.0) if button_hover_start else 0.0
+        reachy_detection._draw_refresh_button(frame, button_progress)
         _draw_bomi_cursor(frame, gx, gy)
-        cv2.imshow(grasp.CAM_WINDOW_NAME, frame)
+        cv2.imshow(reachy_detection.CAM_WINDOW_NAME, frame)
 
         key = cv2.waitKey(1) & 0xFF
-        if safety.quit_requested(key, grasp.CAM_WINDOW_NAME):
+        if safety.quit_requested(key, reachy_detection.CAM_WINDOW_NAME):
             return None, None, (base_frame, detections, labels), crs_x, crs_y
 
 
@@ -303,30 +303,30 @@ def _confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, 
     while True:
         _, crs_x, crs_y, _ = _update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
 
-        gx, gy = _map_bomi_to_frame(crs_x, crs_y, grasp.CONFIRM_CANVAS_WIDTH, grasp.CONFIRM_CANVAS_HEIGHT)
+        gx, gy = _map_bomi_to_frame(crs_x, crs_y, reachy_detection.CONFIRM_CANVAS_WIDTH, reachy_detection.CONFIRM_CANVAS_HEIGHT)
         now = time.time()
-        on_yes = grasp._box_contains(grasp.YES_BUTTON_BOX, gx, gy)
-        on_no = grasp._box_contains(grasp.NO_BUTTON_BOX, gx, gy)
+        on_yes = reachy_detection._box_contains(reachy_detection.YES_BUTTON_BOX, gx, gy)
+        on_no = reachy_detection._box_contains(reachy_detection.NO_BUTTON_BOX, gx, gy)
 
         yes_hover_start = (yes_hover_start or now) if on_yes else None
         no_hover_start = (no_hover_start or now) if on_no else None
-        yes_progress = min((now - yes_hover_start) / grasp.CONFIRM_HOVER_SECONDS, 1.0) if yes_hover_start else 0.0
-        no_progress = min((now - no_hover_start) / grasp.CONFIRM_HOVER_SECONDS, 1.0) if no_hover_start else 0.0
+        yes_progress = min((now - yes_hover_start) / reachy_detection.CONFIRM_HOVER_SECONDS, 1.0) if yes_hover_start else 0.0
+        no_progress = min((now - no_hover_start) / reachy_detection.CONFIRM_HOVER_SECONDS, 1.0) if no_hover_start else 0.0
 
-        canvas = grasp._draw_confirm_canvas(class_name, yes_progress, no_progress)
+        canvas = reachy_detection._draw_confirm_canvas(class_name, yes_progress, no_progress)
         _draw_bomi_cursor(canvas, gx, gy)
-        cv2.imshow(grasp.CONFIRM_WINDOW_NAME, canvas)
+        cv2.imshow(reachy_detection.CONFIRM_WINDOW_NAME, canvas)
 
         key = cv2.waitKey(1) & 0xFF
         result = None
-        quit_now = safety.quit_requested(key, grasp.CONFIRM_WINDOW_NAME)
+        quit_now = safety.quit_requested(key, reachy_detection.CONFIRM_WINDOW_NAME)
         if yes_progress >= 1.0:
             result = True
         elif no_progress >= 1.0:
             result = False
 
         if quit_now or result is not None:
-            cv2.destroyWindow(grasp.CONFIRM_WINDOW_NAME)
+            cv2.destroyWindow(reachy_detection.CONFIRM_WINDOW_NAME)
             return (None if quit_now else result), crs_x, crs_y
 
 
@@ -339,7 +339,7 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
     global _in_grasp_phase
     _in_grasp_phase = True
     try:
-        captured = grasp._capture_and_detect(depth_cam, model, confidence, reachy=reachy)
+        captured = reachy_detection._capture_and_detect(depth_cam, model, confidence, reachy=reachy)
         if captured is None:
             return crs_x, crs_y
 
@@ -357,7 +357,7 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
             if decision is None:
                 break
             if decision:
-                geometry = grasp._build_object_point_cloud(depth_cam, class_name, box)
+                geometry = reachy_detection._build_object_point_cloud(depth_cam, class_name, box)
                 if geometry is not None:
                     print(f"[{class_name}] estimated width={geometry.width_m * 100:.1f}cm  "
                           f"height={geometry.height_m * 100:.1f}cm")
@@ -376,7 +376,7 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
                 break
             # No -> back to the same captured frame/detections, all blue again
 
-        cv2.destroyWindow(grasp.CAM_WINDOW_NAME)
+        cv2.destroyWindow(reachy_detection.CAM_WINDOW_NAME)
         return crs_x, crs_y
     finally:
         _in_grasp_phase = False
@@ -607,10 +607,10 @@ def main() -> None:
     parser.add_argument("--model", default=teleop.DEFAULT_MODEL_PATH,
                         help="Path to the MediaPipe hand_landmarker.task model "
                              f"(default: {teleop.DEFAULT_MODEL_PATH}).")
-    parser.add_argument("--yolo-model", default=grasp.YOLO_MODEL_PATH,
-                        help=f"Path to YOLOv8 weights (default: {grasp.YOLO_MODEL_PATH})")
-    parser.add_argument("--conf", type=float, default=grasp.YOLO_CONFIDENCE,
-                        help=f"Minimum detection confidence (default: {grasp.YOLO_CONFIDENCE})")
+    parser.add_argument("--yolo-model", default=reachy_detection.YOLO_MODEL_PATH,
+                        help=f"Path to YOLOv8 weights (default: {reachy_detection.YOLO_MODEL_PATH})")
+    parser.add_argument("--conf", type=float, default=reachy_detection.YOLO_CONFIDENCE,
+                        help=f"Minimum detection confidence (default: {reachy_detection.YOLO_CONFIDENCE})")
     cli_args = parser.parse_args()
 
     if not os.path.exists(cli_args.model):

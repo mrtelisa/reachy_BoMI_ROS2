@@ -285,6 +285,7 @@ def main() -> None:
     model = YOLO(cli_args.yolo_model)
 
     try:
+        time.sleep(2.0)
         _test_grasp_planning(reachy, model, cli_args.conf)
     finally:
         if stop_terminal_watcher is not None:
