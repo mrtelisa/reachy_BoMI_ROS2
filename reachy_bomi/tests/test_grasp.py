@@ -175,11 +175,16 @@ def _confirm_grasp(class_name: str) -> Optional[bool]:
 def _place_back_and_wind_down(reachy: ReachySDK, plan: reachy_grasp.GraspPlan) -> None:
     """Runs once, right after a successful grasp+lift: puts the object back
     down exactly where it was picked up from and retreats to pregrasp
-    along a straight line (reachy_grasp.place_back), then retracts both
-    arms to elbow_135 (now a safe joint-space move since the gripper
-    already cleared the object), returns to the default posture, then
-    powers off """
+    along a straight line (reachy_grasp.place_back, head watching the
+    end-effector throughout), then -- before retracting -- sends the head
+    back to its own default posture (reachy.head.goto_posture), so it's no
+    longer tracking the end-effector once the arms start moving to elbow_135
+    (now a safe joint-space move since the gripper already cleared the
+    object), returns to the default posture, then powers off """
     reachy_grasp.place_back(reachy, plan)
+
+    if reachy.head is not None:
+        reachy.head.goto_posture(duration=1.0, wait=False)
 
     print("\nRetracting both arms to the elbow_135 posture...")
     _goto_elbow_135(reachy)

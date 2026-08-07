@@ -295,12 +295,24 @@ def plan_grasp(reachy: ReachySDK, geometry: ObjectGeometry) -> Optional[GraspPla
     )
 
 
+def _look_at_matrix(reachy: ReachySDK, matrix: npt.NDArray[np.float64], duration: float) -> None:
+    """Turns the head to look at a pose matrix's position, non-blocking, so
+    it arrives roughly alongside an arm.goto(matrix, duration=duration, ...)
+    started at the same time -- the head "watches" the end-effector travel
+    to each waypoint. A no-op if reachy has no head (look_at itself already
+    no-ops with a warning if the neck is off)."""
+    if reachy.head is not None:
+        reachy.head.look_at(*matrix[:3, 3], duration=duration, wait=False)
+
+
 def execute_grasp(reachy: ReachySDK, plan: GraspPlan, duration: float = ARM_GOTO_DURATION_S) -> bool:
     """Drives plan.arm_name through open -> pregrasp -> grasp -> close ->
-    lift. The pregrasp -> grasp leg uses interpolation_space="cartesian_space"
-    for a straight path, since the two sit on the same horizontal line
-    (see plan_grasp). Returns False without moving if the arm/gripper isn't
-    available or any pose is unreachable from the arm's current joints."""
+    lift, the head turning to watch the end-effector at each leg (see
+    _look_at_matrix). The pregrasp -> grasp leg uses
+    interpolation_space="cartesian_space" for a straight path, since the
+    two sit on the same horizontal line (see plan_grasp). Returns False
+    without moving if the arm/gripper isn't available or any pose is
+    unreachable from the arm's current joints."""
     arm: Optional[Arm] = getattr(reachy, plan.arm_name)
     if arm is None or arm.gripper is None:
         print(f"[ERROR] {plan.arm_name} or its gripper is not available -- grasp not executed")
@@ -317,12 +329,15 @@ def execute_grasp(reachy: ReachySDK, plan: GraspPlan, duration: float = ARM_GOTO
         print(f"[{plan.arm_name}] opening gripper...")
         arm.gripper.open()
         print(f"[{plan.arm_name}] moving to pregrasp...")
+        _look_at_matrix(reachy, plan.pregrasp_matrix, duration)
         arm.goto(plan.pregrasp_matrix, duration=duration, wait=True)
         print(f"[{plan.arm_name}] moving to grasp...")
+        _look_at_matrix(reachy, plan.grasp_matrix, duration)
         arm.goto(plan.grasp_matrix, duration=duration, interpolation_space="cartesian_space", wait=True)
         print(f"[{plan.arm_name}] closing gripper...")
         arm.gripper.close()
         print(f"[{plan.arm_name}] moving to lift...")
+        _look_at_matrix(reachy, plan.lift_matrix, duration)
         arm.goto(plan.lift_matrix, duration=duration, wait=True)
     except RuntimeError as exc:
         print(f"[ERROR] {plan.arm_name} grasp aborted: {exc}")
@@ -340,7 +355,8 @@ def place_back(reachy: ReachySDK, plan: GraspPlan, duration: float = ARM_GOTO_DU
     plan.pregrasp_matrix (cartesian space again, same horizontal line as
     execute_grasp's pregrasp -> grasp leg), so the gripper clears the
     object along a straight line before any joint-space move (e.g. to an
-    elbow_135-style posture) that could otherwise sweep through it.
+    elbow_135-style posture) that could otherwise sweep through it. The
+    head keeps watching the end-effector at each leg (see _look_at_matrix).
     Returns False without moving if the arm/gripper isn't available or
     either pose is unreachable from the arm's current joints."""
     arm: Optional[Arm] = getattr(reachy, plan.arm_name)
@@ -357,10 +373,12 @@ def place_back(reachy: ReachySDK, plan: GraspPlan, duration: float = ARM_GOTO_DU
 
     try:
         print(f"[{plan.arm_name}] placing back down...")
+        _look_at_matrix(reachy, plan.grasp_matrix, duration)
         arm.goto(plan.grasp_matrix, duration=duration, interpolation_space="cartesian_space", wait=True)
         print(f"[{plan.arm_name}] opening gripper...")
         arm.gripper.open()
         print(f"[{plan.arm_name}] retreating to pregrasp...")
+        _look_at_matrix(reachy, plan.pregrasp_matrix, duration)
         arm.goto(plan.pregrasp_matrix, duration=duration, interpolation_space="cartesian_space", wait=True)
     except RuntimeError as exc:
         print(f"[ERROR] {plan.arm_name} place-back aborted: {exc}")

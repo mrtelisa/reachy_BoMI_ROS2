@@ -401,14 +401,20 @@ def _goto_pre_grasp_pose(reachy, duration: float = PRE_GRASP_MOVE_DURATION) -> l
 def _place_back_and_wind_down(reachy, mobile_base, plan: reachy_grasp.GraspPlan) -> None:
     """Runs once, right after a successful grasp+lift: puts the object back
     down exactly where it was picked up from and retreats to pregrasp
-    along a straight line (reachy_grasp.place_back), then retracts both
-    arms to the pre-grasping elbow_135 posture (now a safe joint-space move
-    since the gripper already cleared the object), rotates the base
+    along a straight line (reachy_grasp.place_back, head watching the
+    end-effector throughout), then -- before retracting -- sends the head
+    back to its own default posture (reachy.head.goto_posture), so it's no
+    longer tracking the end-effector once the arms start moving to the
+    pre-grasping elbow_135 posture (now a safe joint-space move since the
+    gripper already cleared the object). Then rotates the base
     safety.SHUTDOWN_ROTATION_DEG so whatever was in front of it (the
     table) ends up behind it instead, then returns to the default posture
     -- leaving the robot in a safe, predictable state for main()'s finally
     block (see _in_grasp_phase) to power off from."""
     reachy_grasp.place_back(reachy, plan)
+
+    if reachy.head is not None:
+        reachy.head.goto_posture(duration=1.0, wait=False)
 
     print(f"\nRetracting both arms to the pre-grasping posture "
           f"(elbow pitch {PRE_GRASP_ELBOW_PITCH_DEG:.0f} deg)...")
