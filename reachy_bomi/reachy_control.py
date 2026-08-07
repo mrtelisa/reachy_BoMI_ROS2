@@ -29,9 +29,11 @@ velocity work caused a recurring stutter even rate-limited. Instead, from
 right after calibration through Phase 3.5 it spawns tests/camera_viewer.py
 as its own OS process (see _start_camera_viewer) showing the head camera,
 stopped the moment Phase 4 opens; Phase 4's look-before-you-grasp checkpoint
-spawns the same script for the torso camera instead, blocking until closed
-(see _show_camera_viewer_blocking). Either window can be closed/quit on its
-own without affecting this process.
+spawns the same script for the same head camera again, blocking until
+closed (see _show_camera_viewer_blocking) -- the hover-select UI itself
+still uses the torso depth camera directly (needed there for YOLO/point
+cloud), this is just the passive pre-execute preview. Either window can be
+closed/quit on its own without affecting this process.
 
 Phases 1-2 (Calibration, Cursor preview): identical to bomi_teleop.py.
 
@@ -69,6 +71,7 @@ import os
 import subprocess
 import sys
 import time
+from typing import Optional
 
 import cv2
 import mediapipe as mp
@@ -103,10 +106,10 @@ PRE_GRASP_MOVE_DURATION = 5.0  # seconds, arm goto duration into the pre-graspin
 # pre-grasping pose, so driving up to the object is finer-grained.
 HALVED_SPEED_FACTOR = 0.75 # max_lin = 0.375 [m/s], max_ang = 0.825 [rad/s] 
 
-# tests/camera_viewer.py, spawned as its own process by _start_camera_viewer
-# for the head camera (Control/pre-grasping pose) and _show_camera_viewer_blocking
-# for the torso camera (grasp checkpoint) -- see either for why this isn't
-# just an in-process stream.show_frame call.
+# tests/camera_viewer.py (head camera, LEFT eye), spawned as its own
+# process by _start_camera_viewer (Control/pre-grasping pose) and
+# _show_camera_viewer_blocking (grasp checkpoint) -- see either for why
+# this isn't just an in-process stream.show_frame call.
 CAMERA_VIEWER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests", "camera_viewer.py")
 
 WAIT_WINDOW_NAME = "BoMI - Waiting"
@@ -175,47 +178,41 @@ def _bring_window_to_front(window_name: str) -> None:
 # in the call stack the quit was triggered from.
 _in_grasp_phase = False
 
-# Camera-viewer subprocesses (tests/camera_viewer.py), keyed by "head"/
-# "torso" -- tracked here rather than threaded through every function that
-# might need to stop one, so _on_emergency_quit/the finally block in
-# main() can always kill whatever's still running, however deep in the
-# call stack it was spawned from.
-_camera_viewer_procs: dict = {}
+# The head-camera-viewer subprocess (tests/camera_viewer.py), if one is
+# currently running -- tracked here rather than threaded through every
+# function that might need to stop it, so _on_emergency_quit/the finally
+# block in main() can always kill it, however deep in the call stack it
+# was started from.
+_camera_viewer_proc: Optional[subprocess.Popen] = None
 
 
-def _start_camera_viewer(name: str, robot_ip: str) -> None:
-    """Spawns tests/camera_viewer.py as its own OS process for the given
-    camera ("head" or "torso") and returns immediately -- keeps its
-    network round-trips (Camera.get_frame) out of this process's own
-    loops entirely, instead of the in-process stream.show_frame this
-    replaced, which had to be rate-limited to avoid stalling
-    _teleop_with_grasp_switch's cursor/velocity timing."""
-    _camera_viewer_procs[name] = subprocess.Popen(
-        [sys.executable, CAMERA_VIEWER_SCRIPT, robot_ip, "--camera", name],
-    )
+def _start_camera_viewer(robot_ip: str) -> None:
+    """Spawns tests/camera_viewer.py as its own OS process and returns
+    immediately -- keeps its network round-trips (Camera.get_frame) out
+    of this process's own loops entirely, instead of the in-process
+    stream.show_frame this replaced, which had to be rate-limited to
+    avoid stalling _teleop_with_grasp_switch's cursor/velocity timing."""
+    global _camera_viewer_proc
+    _camera_viewer_proc = subprocess.Popen([sys.executable, CAMERA_VIEWER_SCRIPT, robot_ip])
 
 
-def _stop_camera_viewer(name: str) -> None:
-    proc = _camera_viewer_procs.pop(name, None)
-    if proc is not None and proc.poll() is None:
-        proc.terminate()
+def _stop_camera_viewer() -> None:
+    global _camera_viewer_proc
+    if _camera_viewer_proc is not None and _camera_viewer_proc.poll() is None:
+        _camera_viewer_proc.terminate()
+    _camera_viewer_proc = None
 
 
-def _stop_all_camera_viewers() -> None:
-    for name in list(_camera_viewer_procs):
-        _stop_camera_viewer(name)
-
-
-def _show_camera_viewer_blocking(name: str, robot_ip: str) -> None:
-    """Like _start_camera_viewer, but blocks until that viewer window is
+def _show_camera_viewer_blocking(robot_ip: str) -> None:
+    """Like _start_camera_viewer, but blocks until the viewer window is
     closed/quit -- a deliberate pause, e.g. reachy_grasp's
     look-before-you-grasp checkpoint before executing a grasp (was an
     in-process stream.stream_blocking call; now an external process for
-    the same reason as the head-camera one, and so ESC/Q still stops the
-    robot via safety.py's global watcher even while this blocks)."""
-    _start_camera_viewer(name, robot_ip)
-    _camera_viewer_procs[name].wait()
-    _camera_viewer_procs.pop(name, None)
+    the same reason as the navigation-phase one, and so ESC/Q still stops
+    the robot via safety.py's global watcher even while this blocks)."""
+    _start_camera_viewer(robot_ip)
+    _camera_viewer_proc.wait()
+    _stop_camera_viewer()
 
 
 # --- BoMI-cursor equivalents of reachy_detection's mouse-driven UI ---
@@ -363,8 +360,10 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
                           f"height={geometry.height_m * 100:.1f}cm")
                     # Live feed as a visual checkpoint before the arm moves: the
                     # frame shown during depth fusion (see _build_object_point_cloud)
-                    # otherwise stays frozen through planning/execution below.
-                    _show_camera_viewer_blocking("torso", robot_ip)
+                    # otherwise stays frozen through planning/execution below. Head
+                    # camera (LEFT eye), same one used during navigation -- not the
+                    # torso depth camera the hover-select UI itself uses.
+                    _show_camera_viewer_blocking(robot_ip)
                     plan = reachy_grasp.plan_grasp(reachy, geometry)
                     if plan is None:
                         print(f"[{class_name}] no feasible grasp (too wide for the gripper, "
@@ -575,7 +574,7 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
             mobile_base.turn_off()
             print("\nMobile base powered off. Switching to object selection for good.")
             cv2.destroyWindow(map_window)
-            _stop_camera_viewer("head")
+            _stop_camera_viewer()
             _run_grasp_mode(
                 cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, reachy, crs_x, crs_y,
                 robot_ip, mobile_base,
@@ -597,7 +596,7 @@ def _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam,
     mobile_base.send_speed_command()
     mobile_base.turn_off()
     cv2.destroyWindow(map_window)
-    _stop_camera_viewer("head")  # no-op if already stopped (Phase 4 switch stops it itself)
+    _stop_camera_viewer()  # no-op if already stopped (Phase 4 switch stops it itself)
 
 
 # --- Entry point ---
@@ -655,7 +654,7 @@ def main() -> None:
     mobile_base.turn_on()
 
     def _on_emergency_quit() -> None:
-        _stop_all_camera_viewers()
+        _stop_camera_viewer()
         safety.emergency_shutdown(reachy, mobile_base, rotate_base_before_shutdown=_in_grasp_phase)
 
     safety.start_global_quit_watcher(_on_emergency_quit)
@@ -688,7 +687,7 @@ def main() -> None:
         bomi_map.fit(samples)
         print("PCA map fitted")
         _bring_window_to_front(teleop.MAP_WINDOW_NAME)
-        _start_camera_viewer("head", cli_args.robot_ip)
+        _start_camera_viewer(cli_args.robot_ip)
 
         cursor_filter = teleop.CursorFilter()
         crs_x, crs_y = teleop._cursor_preview_phase(
@@ -698,7 +697,7 @@ def main() -> None:
         _teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, cli_args.robot_ip, model,
                                    cli_args.conf, reachy, cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y)
     finally:
-        _stop_all_camera_viewers()
+        _stop_camera_viewer()
         if stop_terminal_watcher is not None:
             stop_terminal_watcher()
         safety.safe_robot_shutdown(reachy, mobile_base, rotate_base_before_shutdown=_in_grasp_phase)
