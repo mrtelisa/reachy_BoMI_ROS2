@@ -40,6 +40,7 @@ from reachy2_sdk import ReachySDK
 from ultralytics import YOLO
 
 import reachy_detection
+import reachy_selection
 import safety
 
 DEFAULT_ROBOT_IP = "192.168.0.121"
@@ -61,7 +62,7 @@ def _measure_and_print(depth_cam, class_name: str, box) -> None:
     """Runs the same pipeline used for grasping (bbox crop + 10-frame median
     fusion -> point cloud for position, PCA-based width/height); no plot,
     just prints the result."""
-    geometry = reachy_detection._build_object_point_cloud(depth_cam, class_name, box)
+    geometry = reachy_detection.build_object_point_cloud(depth_cam, class_name, box)
     if geometry is None or geometry.point_cloud.shape[0] == 0:
         print(f"[{class_name}] no valid depth points, cannot estimate size")
         return
@@ -77,12 +78,12 @@ def _measure_and_print(depth_cam, class_name: str, box) -> None:
 
 
 def _stream_and_measure(depth_cam, model: YOLO, confidence: float) -> None:
-    mouse = reachy_detection._MouseTracker(reachy_detection.CAM_WINDOW_NAME)
+    mouse = reachy_selection.MouseTracker(reachy_detection.CAM_WINDOW_NAME)
     hovered_box = None
     hover_start = None
 
     print(f"\n=== LIVE DIMENSION CHECK ===  Q = quit  |  hover a box for "
-          f"{reachy_detection.HOVER_HOLD_SECONDS:.0f}s to print its estimated size")
+          f"{reachy_selection.HOVER_HOLD_SECONDS:.0f}s to print its estimated size")
 
     while True:
         result = depth_cam.get_frame(view=reachy_detection.CameraView.LEFT)
@@ -90,26 +91,26 @@ def _stream_and_measure(depth_cam, model: YOLO, confidence: float) -> None:
             continue
         frame, _timestamp = result
 
-        detections = reachy_detection._detect_graspable_objects(model, frame, confidence)
-        hovered = reachy_detection._find_hovered_detection(detections, mouse.x, mouse.y)
+        detections = reachy_detection.detect_graspable_objects(model, frame, confidence)
+        hovered = reachy_selection.find_hovered_detection(detections, mouse.x, mouse.y)
         now = time.time()
 
         if hovered is None:
             hovered_box, hover_start = None, None
         else:
             box = hovered[2]
-            if hovered_box is None or reachy_detection._iou(box, hovered_box) < reachy_detection.HOVER_IOU_MATCH:
+            if hovered_box is None or reachy_selection.iou(box, hovered_box) < reachy_selection.HOVER_IOU_MATCH:
                 hover_start = now
             hovered_box = box
         hover_duration = (now - hover_start) if hover_start is not None else 0.0
-        is_held = hovered is not None and hover_duration >= reachy_detection.HOVER_HOLD_SECONDS
+        is_held = hovered is not None and hover_duration >= reachy_selection.HOVER_HOLD_SECONDS
 
-        hover_progress = min(hover_duration / reachy_detection.HOVER_HOLD_SECONDS, 1.0) if hovered is not None else 0.0
+        hover_progress = min(hover_duration / reachy_selection.HOVER_HOLD_SECONDS, 1.0) if hovered is not None else 0.0
         for class_name, conf, box in detections:
             is_hovered = hovered is not None and box == hovered[2]
             color = reachy_detection.COLOR_GREEN if (is_hovered and is_held) else (
                 reachy_detection.COLOR_YELLOW if is_hovered else reachy_detection.COLOR_BLUE)
-            reachy_detection._draw_box(frame, box, f"{class_name} {conf:.2f}", color, hover_progress if is_hovered else 0.0)
+            reachy_detection.draw_box(frame, box, f"{class_name} {conf:.2f}", color, hover_progress if is_hovered else 0.0)
         cv2.imshow(reachy_detection.CAM_WINDOW_NAME, frame)
 
         if is_held:

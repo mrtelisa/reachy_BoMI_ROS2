@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """Connect to Reachy2 and show a live feed from its head/teleop camera's
-LEFT eye -- nothing else, no robot motion. Meant to run as its own OS
-process, spawned by reachy_control.py (see there) so the camera's network
-round-trip (Camera.get_frame) never sits inside reachy_control.py's own
-loops -- used both while driving (Control/pre-grasping pose) and as the
-look-before-you-grasp checkpoint right before a grasp executes.
+LEFT eye. Meant to run as its own OS process, spawned during Control so the 
+camera's network round-trip never sits inside the main file cursor/velocity-timed loop.
 
 Usage:
     python3 camera_viewer.py [robot_ip]
@@ -12,10 +9,7 @@ Usage:
 """
 
 import argparse
-import os
 import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from reachy2_sdk import ReachySDK
 

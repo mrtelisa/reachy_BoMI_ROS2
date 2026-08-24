@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""All matplotlib plotting for the grasp pipeline, in one place -- so
-reachy_detection.py/reachy_grasp.py stay focused on the pipeline itself,
-and every plot's window-focus workaround lives in a single spot."""
+"""All matplotlib plotting for the grasp pipeline."""
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,9 +7,9 @@ import numpy as np
 
 def show_point_cloud(point_cloud: np.ndarray, class_name: str) -> None:
     """Non-blocking 3D scatter view of a point cloud (Reachy coords,
-    meters), colored by height. Used for the intermediate pipeline stages
+    [m]), colored by height. Used for the intermediate pipeline stages
     (raw capture, distortion-corrected, isolated, final) -- see the
-    commented-out calls in reachy_detection._build_object_point_cloud."""
+    commented-out calls in reachy_detection.build_object_point_cloud."""
     if point_cloud.shape[0] == 0:
         print("[WARN] Point cloud is empty, nothing to show")
         return
@@ -26,8 +24,7 @@ def show_point_cloud(point_cloud: np.ndarray, class_name: str) -> None:
     ax.set_title(f"{class_name}: {len(point_cloud)} points")
     fig.colorbar(scatter, ax=ax, shrink=0.6, label="z (m)")
 
-    # Equal aspect ratio on all three axes, so the object's proportions
-    # aren't visually distorted by whichever axis happens to span more.
+    # Equal aspect ratio on all three axes
     ranges = point_cloud.max(axis=0) - point_cloud.min(axis=0)
     half_range = max(ranges.max() / 2.0, 1e-3)
     mid = point_cloud.mean(axis=0)
@@ -40,10 +37,8 @@ def show_point_cloud(point_cloud: np.ndarray, class_name: str) -> None:
 
 
 def show_grasp_plan(geometry, plan) -> None:
-    """Non-blocking 3D scatter of the object's point cloud (geometry:
-    reachy_grasp.ObjectGeometry) with the planned pre-grasp/grasp/lift EE
-    positions (plan: reachy_grasp.GraspPlan) marked on top, to sanity-check
-    a plan visually before trusting execute_grasp to actually move."""
+    """Non-blocking 3D scatter of the object's point cloud with the planned 
+    pre-grasp/grasp/lift EE positions marked on top."""
     point_cloud = geometry.point_cloud
     if point_cloud.shape[0] == 0:
         print("[WARN] Point cloud is empty, nothing to show")
@@ -70,8 +65,7 @@ def show_grasp_plan(geometry, plan) -> None:
     ax.set_title(f"{geometry.class_name}: planned grasp ({plan.arm_name})")
     ax.legend(loc="upper left", fontsize=8)
 
-    # Equal aspect ratio over the point cloud + waypoints, so pre-grasp/lift
-    # (offset from the object) aren't clipped and proportions aren't distorted.
+    # Equal aspect ratio over the point cloud + waypoints
     all_points = np.vstack([point_cloud, [pregrasp_pos, grasp_pos, lift_pos]])
     ranges = all_points.max(axis=0) - all_points.min(axis=0)
     half_range = max(ranges.max() / 2.0, 1e-3)
@@ -82,8 +76,7 @@ def show_grasp_plan(geometry, plan) -> None:
 
     plt.show(block=False)
     # Several short pauses, not one: gives the window manager more chances
-    # to map/raise the window before the caller's OpenCV loop (cv2.imshow +
-    # waitKey) resumes and starves matplotlib's event loop. plt.pause(), not
-    # driving the Tk window directly, so it stays properly closable.
+    # to map/raise the window before cv2.imshow + waitKey resume and starve
+    #  matplotlib's event loop. 
     for _ in range(10):
         plt.pause(0.1)

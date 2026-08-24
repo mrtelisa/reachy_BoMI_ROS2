@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Grasp planning + execution for Reachy2: from reachy_detection.py's point
+Library module-- Grasp planning + execution: from reachy_detection.py's point
 cloud (position, axes, width/height, table normal) for a confirmed object,
 computes pre-grasp/grasp/lift end-effector poses and drives the arm through
-them over reachy2_sdk.
+them.
 
-Pose matrix convention (world: X forward, Y left, Z up; verified against
-https://docs.pollen-robotics.com/developing-with-reachy-2/basics/4-use-arm-kinematics/):
-end-effector local -Z = approach direction, local Y = gripper open/close
-axis. See _orientation_from_approach.
+World pose matrix convention: X forward, Y left, Z up; verified at
+https://docs.pollen-robotics.com/developing-with-reachy-2/basics/4-use-arm-kinematics/.
 """
 
 from typing import List, NamedTuple, Optional
@@ -18,50 +16,40 @@ import numpy.typing as npt
 from reachy2_sdk import ReachySDK
 from reachy2_sdk.parts.arm import Arm
 
-# Reachy2 parallel gripper's max fingertip opening, in meters.
-GRIPPER_MAX_OPENING_M = 0.1
+GRIPPER_MAX_OPENING_M = 0.1 # [m], parallel gripper's max fingertip opening
 
 # How far back from the grasp point, opposite the approach direction, the
-# pre-grasp waypoint sits.
+# pre-grasp waypoint sits
 PREGRASP_STANDOFF_M = 0.10
 
-# How far straight up (along the table normal) the arm lifts once the
-# gripper has closed on the object.
+# How far straight up the arm lifts once the gripper has closed 
 GRASP_LIFT_M = 0.15
 
 ARM_GOTO_DURATION_S = 6.0
 
 # How far outside the object's near surface (beyond its radius) the
-# commanded EE position sits. Reachy2's EE frame is at the gripper's
-# center, not the fingertips, so aiming at the object's center would put
-# the frame origin -- and the fingers, further along approach still --
-# inside the object's own volume.
+# commanded EE position sits
 GRASP_APPROACH_MARGIN_M = 0.0
 
-# Fallback "up" direction (Reachy world frame) when the table plane fit
-# fails (see reachy_detection._remove_table_plane).
+# Fallback "up" direction (Reachy world frame) when the table plane fit fails 
 DEFAULT_TABLE_NORMAL: npt.NDArray[np.float64] = np.array([0.0, 0.0, 1.0])
 
 # How many horizontal approach directions _approach_candidates spreads
-# across the full circle around the object when searching for one IK accepts.
+# across the full circle around the object when searching for one IK accepts
 APPROACH_CANDIDATE_COUNT = 16
 
 # Grasp height as a fraction of the object's height, measured from its
-# base (0 = bottom, 1 = top). 3/5 rather than the geometric middle -- e.g.
-# for a bottle, closer to its center of mass / where it's held by hand.
+# base (0 = bottom, 1 = top)
 GRASP_HEIGHT_FRACTION = 3 / 5
 
-# How many horizontal approach directions is_roughly_reachable tries --
-# fewer than APPROACH_CANDIDATE_COUNT since it runs per detection, before
-# the user has even picked one, and only needs a yes/no, not the best line.
+# How many horizontal approach directions is_roughly_reachable tries
 QUICK_REACHABILITY_CANDIDATE_COUNT = 8
 
 
 class ObjectGeometry(NamedTuple):
     """Everything reachy_detection.py's point cloud pipeline knows about a
     confirmed object, in Reachy's world frame (meters). centroid/axes/
-    table_normal are None if too few points survived isolation to fit
-    them -- plan_grasp then treats the object as ungraspable."""
+    table_normal are None if too few points survived isolation to fit them"""
 
     class_name: str
     shape: str
@@ -80,21 +68,25 @@ class GraspPlan(NamedTuple):
     lift_matrix: npt.NDArray[np.float64]  # 4x4, Reachy world frame
 
 
+def _pose_matrix(rotation: npt.NDArray[np.float64], position: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    matrix = np.eye(4)
+    matrix[:3, :3] = rotation
+    matrix[:3, 3] = position
+    return matrix
+
+
+# --- Approach and grasping parameters ---
 def _orientation_from_approach(
     approach: npt.NDArray[np.float64], closing_axis: npt.NDArray[np.float64],
 ) -> npt.NDArray[np.float64]:
     """3x3 rotation for an end-effector reaching along world-frame `approach`
-    with its gripper opening/closing along world-frame `closing_axis`
-    (local -Z = approach, local Y = closing_axis, local X completes a
-    right-handed frame). closing_axis is re-projected perpendicular to
-    approach first, so it only needs to be roughly right."""
+    with its gripper opening/closing along world-frame `closing_axis`."""
     local_z = -approach / np.linalg.norm(approach)
 
     local_y = closing_axis - local_z * np.dot(closing_axis, local_z)
     local_y_norm = np.linalg.norm(local_y)
     if local_y_norm < 1e-6:
-        # closing_axis was parallel to approach -- fall back to whichever
-        # world axis is least aligned with it.
+        # closing_axis was parallel to approach 
         fallback = np.eye(3)[np.argmin(np.abs(approach))]
         local_y = fallback - local_z * np.dot(fallback, local_z)
         local_y_norm = np.linalg.norm(local_y)
@@ -104,21 +96,12 @@ def _orientation_from_approach(
     return np.column_stack([local_x, local_y, local_z])
 
 
-def _pose_matrix(rotation: npt.NDArray[np.float64], position: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-    matrix = np.eye(4)
-    matrix[:3, :3] = rotation
-    matrix[:3, 3] = position
-    return matrix
-
-
 def _side_grasp_closing_axis(
     approach: npt.NDArray[np.float64], up: npt.NDArray[np.float64],
 ) -> npt.NDArray[np.float64]:
     """The one closing axis, for a horizontal `approach`, that keeps the
     gripper's local X axis pointing straight up (parallel to the table,
-    aligned with the object's own axis) -- derived directly as
-    cross(-approach, up), not searched, since local_X = up and local_Z =
-    -approach fully determine local_Y = local_Z x local_X."""
+    aligned with the object's own axis) -- derived directly as cross(-approach, up)."""
     closing_axis = np.cross(-approach, up)
     return closing_axis / np.linalg.norm(closing_axis)
 
@@ -127,15 +110,11 @@ def _approach_candidates(
     mid_position: npt.NDArray[np.float64], table_normal: npt.NDArray[np.float64], count: int = APPROACH_CANDIDATE_COUNT,
 ) -> List[npt.NDArray[np.float64]]:
     """`count` horizontal approach directions spanning the full circle
-    around the object (not just 180 deg -- opposite sides reach through
-    completely different parts of the arm's workspace), starting from the
-    direct line from Reachy's origin to the object. A cylinder/sphere looks
-    the same from every horizontal direction, so any of these is an equally
-    valid grasp; plan_grasp searches them for one IK actually accepts."""
+    around the object."""
     radial_xy = mid_position[:2]
     radial_norm = np.linalg.norm(radial_xy)
     if radial_norm < 1e-6:
-        default = np.array([1.0, 0.0, 0.0])  # object directly below the origin -- arbitrary but valid start
+        default = np.array([1.0, 0.0, 0.0])  # object directly below the origin -- arbitrary but valid 
     else:
         default = np.array([radial_xy[0] / radial_norm, radial_xy[1] / radial_norm, 0.0])
 
@@ -143,7 +122,7 @@ def _approach_candidates(
     perp = np.cross(up, default)
     perp_norm = np.linalg.norm(perp)
     if perp_norm < 1e-6:
-        # table_normal isn't close to vertical (a bad table-plane fit) --
+        # table_normal isn't close to vertical (a bad table-plane fit)
         # fall back to an arbitrary horizontal-ish axis.
         perp = np.cross(up, np.array([1.0, 0.0, 0.0]))
         if np.linalg.norm(perp) < 1e-6:
@@ -153,21 +132,31 @@ def _approach_candidates(
     return [default * np.cos(theta) + perp * np.sin(theta) for theta in np.linspace(0, 2 * np.pi, count, endpoint=False)]
 
 
+def _grasp_height_position(
+    geometry: ObjectGeometry, table_normal: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    """geometry.centroid recentered along the object's long axis to
+    GRASP_HEIGHT_FRACTION of its observed height range, measured from the
+    base."""
+    long_axis = geometry.axes[:, 0]
+    offsets = (geometry.point_cloud - geometry.centroid) @ long_axis
+    base_offset, top_offset = (
+        (float(offsets.min()), float(offsets.max()))
+        if np.dot(long_axis, table_normal) >= 0
+        else (float(offsets.max()), float(offsets.min()))
+    )
+    target_offset = base_offset + GRASP_HEIGHT_FRACTION * (top_offset - base_offset)
+    return geometry.centroid + target_offset * long_axis
+
+
+# --- Cheap reachability pre-filter ---
 def is_roughly_reachable(
     reachy: ReachySDK, position: npt.NDArray[np.float64], count: int = QUICK_REACHABILITY_CANDIDATE_COUNT,
 ) -> bool:
-    """Cheap reachability pre-filter for a single 3D point -- e.g. a
-    detection's single-pixel depth estimate (reachy_detection.
-    _estimate_object_position), available immediately at capture time,
-    well before an object is confirmed and its full point cloud (10-frame
-    depth fusion, several seconds, one network round-trip per frame) gets
-    built. Ignores the object's actual radius/orientation (unknown at
-    this stage) and checks only the pregrasp position, not grasp too --
-    a coarse "is this worth showing a box for", not a committed plan
-    (that's plan_grasp, once the point cloud exists and execute_grasp is
-    about to run for real). True if IK accepts a horizontal-approach
-    pregrasp pose, from either arm, for at least one of `count` candidate
-    directions."""
+    """Cheap reachability pre-filter. Ignores the object's actual radius/orientation 
+    (unknown at detection time) and checks only the pregrasp position, not grasp too.
+    True if IK accepts a horizontal-approach pregrasp pose, from either arm, for at 
+    least one of `count` candidate directions."""
     near_side = "r_arm" if position[1] < 0 else "l_arm"
     far_side = "l_arm" if near_side == "r_arm" else "r_arm"
 
@@ -186,46 +175,16 @@ def is_roughly_reachable(
     return False
 
 
-def _grasp_height_position(
-    geometry: ObjectGeometry, table_normal: npt.NDArray[np.float64],
-) -> npt.NDArray[np.float64]:
-    """geometry.centroid recentered along the object's long axis to
-    GRASP_HEIGHT_FRACTION of its observed height range, measured from the
-    base -- also correcting for the density bias of a partial view (a
-    cylinder's cap has fewer points than its body, so the raw mean skews
-    low). Skip for "sphere": its centroid is already the true fitted 3D
-    center (reachy_detection._object_dimensions).
-
-    PCA gives long_axis an arbitrary sign, so "base" isn't necessarily its
-    min end -- table_normal (already resolved to Reachy world "up",
-    defaulting when unfitted) picks out which end is which."""
-    long_axis = geometry.axes[:, 0]
-    offsets = (geometry.point_cloud - geometry.centroid) @ long_axis
-    base_offset, top_offset = (
-        (float(offsets.min()), float(offsets.max()))
-        if np.dot(long_axis, table_normal) >= 0
-        else (float(offsets.max()), float(offsets.min()))
-    )
-    target_offset = base_offset + GRASP_HEIGHT_FRACTION * (top_offset - base_offset)
-    return geometry.centroid + target_offset * long_axis
-
-
+# --- Grasp planning ---
 def plan_grasp(reachy: ReachySDK, geometry: ObjectGeometry) -> Optional[GraspPlan]:
     """Pre-grasp + grasp + lift end-effector poses for `geometry`, or None
     if its pose couldn't be estimated or it's too wide for the gripper.
 
     Approaches horizontally at GRASP_HEIGHT_FRACTION of the object's
-    height, gripper kept
-    "parallel to the table" (see _side_grasp_closing_axis) -- both
-    "cylinder" and "sphere" are radially symmetric around a vertical axis,
-    so any height/horizontal direction is an equally valid grasp. For each
-    arm (near-side by y sign first, then the other), searches
-    _approach_candidates for a direction IK accepts for both pregrasp and
-    grasp, instead of committing to the single most direct line. Falls
-    back to the near-side arm at the default direction if nothing is
-    found, so a plan is always returned to inspect (e.g. via
-    show_grasp_plan) even if execute_grasp will then refuse to move.
-    """
+    height. For each arm, searches _approach_candidates for a direction IK accepts 
+    for both pregrasp and grasp. Falls back to the near-side arm at the default 
+    direction if nothing is found, so a plan is always returned to inspect even if 
+    execute_grasp will then refuse to move."""
     if geometry.centroid is None or geometry.axes is None:
         return None
     if not (0 < geometry.width_m <= GRIPPER_MAX_OPENING_M):
@@ -250,7 +209,7 @@ def plan_grasp(reachy: ReachySDK, geometry: ObjectGeometry) -> Optional[GraspPla
     far_side = "l_arm" if near_side == "r_arm" else "r_arm"
 
     # Fallback if nothing below is confirmed reachable: the single most
-    # direct line, near-side arm -- unvalidated, but still a plan to inspect.
+    # direct line, near-side arm
     arm_name = near_side
     approach = _approach_candidates(mid_position, table_normal)[0]
     pregrasp_position, grasp_position, rotation = _pregrasp_grasp_rotation_for(approach)
@@ -296,23 +255,16 @@ def plan_grasp(reachy: ReachySDK, geometry: ObjectGeometry) -> Optional[GraspPla
 
 
 def _look_at_matrix(reachy: ReachySDK, matrix: npt.NDArray[np.float64], duration: float) -> None:
-    """Turns the head to look at a pose matrix's position, non-blocking, so
-    it arrives roughly alongside an arm.goto(matrix, duration=duration, ...)
-    started at the same time -- the head "watches" the end-effector travel
-    to each waypoint. A no-op if reachy has no head (look_at itself already
-    no-ops with a warning if the neck is off)."""
+    """Turns the head to look at a pose matrix's position, non-blocking."""
     if reachy.head is not None:
         reachy.head.look_at(*matrix[:3, 3], duration=duration, wait=False)
 
 
 def execute_grasp(reachy: ReachySDK, plan: GraspPlan, duration: float = ARM_GOTO_DURATION_S) -> bool:
     """Drives plan.arm_name through open -> pregrasp -> grasp -> close ->
-    lift, the head turning to watch the end-effector at each leg (see
-    _look_at_matrix). The pregrasp -> grasp leg uses
-    interpolation_space="cartesian_space" for a straight path, since the
-    two sit on the same horizontal line (see plan_grasp). Returns False
-    without moving if the arm/gripper isn't available or any pose is
-    unreachable from the arm's current joints."""
+    lift, the head turning to watch the end-effector at each arm.
+    Returns False without moving if the arm/gripper isn't available or 
+    any pose is unreachable from the arm's current joints."""
     arm: Optional[Arm] = getattr(reachy, plan.arm_name)
     if arm is None or arm.gripper is None:
         print(f"[ERROR] {plan.arm_name} or its gripper is not available -- grasp not executed")
@@ -349,16 +301,9 @@ def execute_grasp(reachy: ReachySDK, plan: GraspPlan, duration: float = ARM_GOTO
 
 def place_back(reachy: ReachySDK, plan: GraspPlan, duration: float = ARM_GOTO_DURATION_S) -> bool:
     """Reverses execute_grasp: moves plan.arm_name from lift back down to
-    plan.grasp_matrix (cartesian space, same vertical line as the lift leg
-    -- see plan_grasp), opens the gripper -- putting the object back down
-    exactly where it was picked up from -- then retreats back out to
-    plan.pregrasp_matrix (cartesian space again, same horizontal line as
-    execute_grasp's pregrasp -> grasp leg), so the gripper clears the
-    object along a straight line before any joint-space move (e.g. to an
-    elbow_135-style posture) that could otherwise sweep through it. The
-    head keeps watching the end-effector at each leg (see _look_at_matrix).
-    Returns False without moving if the arm/gripper isn't available or
-    either pose is unreachable from the arm's current joints."""
+    plan.grasp_matrix, opens the gripper, then retreats back out to
+    plan.pregrasp_matrix. Returns False without moving if the arm/gripper 
+    isn't available or either pose is unreachable from the arm's current joints."""
     arm: Optional[Arm] = getattr(reachy, plan.arm_name)
     if arm is None or arm.gripper is None:
         print(f"[ERROR] {plan.arm_name} or its gripper is not available -- can't place back")

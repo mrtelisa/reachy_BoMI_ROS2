@@ -175,16 +175,14 @@ def apply_region_velocity_mask(region: int, lin_vel: float, ang_vel: float) -> t
 
 
 # --- PCA forward map ---
-def _extract_hand_features(hand_landmarks, mirror_x: bool = False) -> np.ndarray:
+def _extract_hand_features(hand_landmarks) -> np.ndarray:
     """
     Flatten all 21 hand landmarks (x, y) into a 42-element vector.
-    If mirror_x, x is mirrored (1 - x) so the right hand maps to the same
-    feature space as the left hand.
 
     hand_landmarks is the list of NormalizedLandmark returned by MediaPipe
     Tasks (e.g. results.hand_landmarks[0]).
     """
-    coords = [[1.0 - lm.x if mirror_x else lm.x, lm.y] for lm in hand_landmarks]
+    coords = [[lm.x, lm.y] for lm in hand_landmarks]
     return np.array(coords).flatten()
 
 
@@ -342,8 +340,7 @@ def _calibration_phase(cap, landmarker) -> list:
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord(' ') and results.hand_landmarks:
-            mirror_x = results.handedness[0][0].category_name == "Right"
-            samples.append(_extract_hand_features(results.hand_landmarks[0], mirror_x))
+            samples.append(_extract_hand_features(results.hand_landmarks[0]))
             print(f"  Sample {len(samples)} recorded")
 
         elif key == 13:  # ENTER
@@ -395,8 +392,7 @@ def _cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, hold_seconds: floa
         if hand_detected:
             hl = results.hand_landmarks[0]
             _draw_hand_landmarks(frame, hl)
-            mirror_x = results.handedness[0][0].category_name == "Right"
-            crs_x, crs_y = bomi_map.transform(_extract_hand_features(hl, mirror_x))
+            crs_x, crs_y = bomi_map.transform(_extract_hand_features(hl))
             crs_x, crs_y = cursor_filter.update(crs_x, crs_y)
             region = check_region_cursor(crs_x, crs_y)
 
@@ -446,8 +442,7 @@ def _control_phase(cap, landmarker, bomi_map: BoMIMap) -> None:
         if results.hand_landmarks:
             hl = results.hand_landmarks[0]
             _draw_hand_landmarks(frame, hl)
-            mirror_x = results.handedness[0][0].category_name == "Right"
-            crs_x, crs_y = bomi_map.transform(_extract_hand_features(hl, mirror_x))
+            crs_x, crs_y = bomi_map.transform(_extract_hand_features(hl))
             crs_x, crs_y = cursor_filter.update(crs_x, crs_y)
             region = check_region_cursor(crs_x, crs_y)
             lin_vel, ang_vel = compute_dynamic_vel_from_cursor(crs_x, crs_y)

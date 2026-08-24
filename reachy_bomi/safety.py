@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Quit/shutdown safety net for the whole pipeline (bomi_teleop.py,
-reachy_detection.py, reachy_control.py, tests/test_grasp.py) -- no
-dependencies on any of them, so it can be imported from all without risk
-of circular imports.
+"""Quit/shutdown safety net for the whole pipeline.
 
 Two layers, because a single cv2.waitKey-based check only ever fires while
-a cv2 window has OS focus and the caller's own loop is actively polling
-it -- neither holds while e.g. a matplotlib plot has focus, or the main
-thread is blocked inside arm.goto(wait=True):
+a cv2 window has OS focus and the caller's own loop is actively polling it:
   - quit_requested: local, in-loop check (Q/ESC while a cv2 window has
     focus, or that window closed) for graceful "go back a step" UI flow.
   - start_global_quit_watcher / start_terminal_quit_watcher: OS-level
@@ -24,6 +19,10 @@ import tty
 
 import cv2
 from reachy2_sdk import ReachySDK
+
+# How much the base rotates in place  before powering down, when
+# rotate_base_before_shutdown is set to True
+SHUTDOWN_ROTATION_DEG = 180.0
 
 
 def quit_requested(key: int, window_name: str) -> bool:
@@ -61,8 +60,7 @@ def start_global_quit_watcher(on_quit):
 
 def start_terminal_quit_watcher(on_quit):
     """Watches this process's own terminal for ESC/Q, for when the terminal
-    (not a cv2 window, not the global pynput hook under Wayland) is what
-    actually has keyboard focus. Returns a stop() to restore the terminal,
+    is what actually has keyboard focus. Returns a stop() to restore the terminal,
     or None if stdin isn't an interactive terminal."""
     if not sys.stdin.isatty():
         return None
@@ -98,24 +96,12 @@ def start_terminal_quit_watcher(on_quit):
     return stop
 
 
-# How far the base rotates in place (relative, either direction -- the
-# SDK doesn't distinguish) before powering down, when
-# rotate_base_before_shutdown is set: a half-turn, so whatever was in
-# front (e.g. a table, during object selection/grasping) ends up behind
-# the robot instead, clear of the arms as they fold in for turn_off_smoothly.
-SHUTDOWN_ROTATION_DEG = 180.0
-
-
 def safe_robot_shutdown(reachy: ReachySDK, mobile_base=None, rotate_base_before_shutdown: bool = False) -> None:
-    """Stop the base, then power down smoothly (falls back to a hard
-    turn_off). Swallows exceptions since this also runs on the emergency
-    quit path, where raising would block the process from exiting.
+    """Stop the base, then power down smoothly. Swallows exceptions.
 
     rotate_base_before_shutdown=True rotates the base SHUTDOWN_ROTATION_DEG
-    in place first (re-enabling it briefly if it was already turned off,
-    e.g. reachy_control.py powers it off before object selection/grasping)
-    -- pass this whenever the robot may be sitting close to a table with
-    its arms about to fold in, so they don't fold into it."""
+    in place first -- pass this whenever the robot may be sitting close to 
+    a table with its arms about to fold in, so they don't fold into it."""
     if mobile_base is not None:
         try:
             mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
@@ -149,8 +135,7 @@ def emergency_shutdown(reachy: ReachySDK, mobile_base=None, rotate_base_before_s
     """safe_robot_shutdown + disconnect + close every cv2 window, then a
     hard process exit. Meant as the on_quit callback for the watchers
     above, so ESC/Q stops the robot no matter what the main thread is
-    currently blocked doing (a plt.pause() loop, an arm.goto(wait=True), ...).
-    rotate_base_before_shutdown: see safe_robot_shutdown."""
+    currently blocked doing."""
     print("\n[QUIT] ESC/Q pressed — stopping the robot and exiting.")
     try:
         safe_robot_shutdown(reachy, mobile_base, rotate_base_before_shutdown=rotate_base_before_shutdown)

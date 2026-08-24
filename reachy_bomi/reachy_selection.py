@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""
+Library module -- hover-to-select/confirm UI for a detected object: maps a
+hover point onto reachy_detection.py's YOLO boxes, drives the
+dwell-to-select/refresh/confirm flow, and draws the corresponding overlays.
+
+select_object_to_grasp_bomi/confirm_grasp_bomi drive that hover point from a
+BoMI cursor (bomi_teleop.py). 
+
+MouseTracker is a standalone alternative hover-point source, for driving the 
+same box_contains/find_hovered_detection geometry from a real mouse instead.
+"""
+
+import time
+from typing import List, Optional
+
+import cv2
+import numpy as np
+
+import bomi_teleop
+import reachy_detection
+import reachy_grasp
+import safety
+
+Box = reachy_detection.Box
+
+HOVER_HOLD_SECONDS = 5.0  # [s], time before a detection becomes "selected" for confirmation
+HOVER_IOU_MATCH = 0.3     # min overlap between frames to count as "still hovering the same object"
+
+REFRESH_BUTTON_BOX: Box = (10, 10, 260, 90)
+COLOR_BUTTON = (0, 0, 255)
+COLOR_BUTTON_TEXT = (255, 255, 255)
+REFRESH_HOVER_SECONDS = 5.0
+
+CONFIRM_WINDOW_NAME = "BoMI - Confirm Grasp"
+CONFIRM_CANVAS_WIDTH = 520
+CONFIRM_CANVAS_HEIGHT = 260
+CONFIRM_HOVER_SECONDS = 5.0
+YES_BUTTON_BOX: Box = (60, 150, 240, 220)
+NO_BUTTON_BOX: Box = (280, 150, 460, 220)
+COLOR_YES = (0, 200, 0)
+COLOR_NO = (0, 0, 255)
+
+COLOR_CURSOR = (255, 0, 255)
+
+# BGR colors
+COLOR_BLUE = (255, 0, 0)
+COLOR_YELLOW = (0, 255, 255)
+
+
+# --- Drawing windows and cursor ---
+def draw_refresh_button(frame: np.ndarray, progress: float = 0.0) -> None:
+    x1, y1, x2, y2 = REFRESH_BUTTON_BOX
+    cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_BUTTON, -1)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_BUTTON_TEXT, 1)
+
+    text = "Refresh"
+    font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 1.1, 2
+    (text_w, text_h), _ = cv2.getTextSize(text, font, scale, thickness)
+    text_x = x1 + ((x2 - x1) - text_w) // 2
+    text_y = y1 + ((y2 - y1) + text_h) // 2
+    cv2.putText(frame, text, (text_x, text_y), font, scale, COLOR_BUTTON_TEXT, thickness)
+
+    if progress > 0:
+        bar_width = int((x2 - x1) * progress)
+        cv2.rectangle(frame, (x1, y2 - 8), (x1 + bar_width, y2), COLOR_BUTTON_TEXT, -1)
+
+
+def draw_confirm_canvas(class_name: str, yes_progress: float, no_progress: float) -> np.ndarray:
+    canvas = np.full((CONFIRM_CANVAS_HEIGHT, CONFIRM_CANVAS_WIDTH, 3), 30, dtype=np.uint8)
+
+    cv2.putText(canvas, f"You have select the {class_name} to be grasped.",
+                (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_BUTTON_TEXT, 1)
+    cv2.putText(canvas, "Do you want to confirm?",
+                (20, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_BUTTON_TEXT, 2)
+
+    for box, label, color, progress in (
+        (YES_BUTTON_BOX, "Yes", COLOR_YES, yes_progress),
+        (NO_BUTTON_BOX, "No", COLOR_NO, no_progress),
+    ):
+        x1, y1, x2, y2 = box
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, -1)
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), COLOR_BUTTON_TEXT, 1)
+        cv2.putText(canvas, label, (x1 + 60, y2 - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.9, COLOR_BUTTON_TEXT, 2)
+        if progress > 0:
+            bar_width = int((x2 - x1) * progress)
+            cv2.rectangle(canvas, (x1, y2 - 8), (x1 + bar_width, y2), COLOR_BUTTON_TEXT, -1)
+
+    return canvas
+
+
+def _draw_bomi_cursor(frame: np.ndarray, x: int, y: int) -> None:
+    cv2.drawMarker(frame, (x, y), COLOR_CURSOR, markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
+
+
+# --- Hover geometry ---
+def box_contains(box: Box, x: int, y: int) -> bool:
+    x1, y1, x2, y2 = box
+    return x1 <= x <= x2 and y1 <= y <= y2
+
+
+def iou(box_a: Box, box_b: Box) -> float:
+    """ Computes the Intersection Over Union of two bboxes."""
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    inter_w = max(0, min(ax2, bx2) - max(ax1, bx1))
+    inter_h = max(0, min(ay2, by2) - max(ay1, by1))
+    inter_area = inter_w * inter_h
+    if inter_area == 0:
+        return 0.0
+    area_a = (ax2 - ax1) * (ay2 - ay1)
+    area_b = (bx2 - bx1) * (by2 - by1)
+    return inter_area / float(area_a + area_b - inter_area)
+
+
+def find_hovered_detection(
+    detections: List["reachy_detection.Detection"], x: int, y: int,
+) -> Optional["reachy_detection.Detection"]:
+    """Smallest-area detection whose box contains (x, y), or None if none does."""
+    hovered = None
+    hovered_area = None
+    for detection in detections:
+        _, _, box = detection
+        if not box_contains(box, x, y):
+            continue
+        x1, y1, x2, y2 = box
+        area = (x2 - x1) * (y2 - y1)
+        if hovered_area is None or area < hovered_area:
+            hovered, hovered_area = detection, area
+    return hovered
+
+
+# --- Filter for detections ---
+def presentable_filter(reachy):
+    """is_selectable predicate for reachy_detection.capture_and_detect: keeps
+    only detections plausibly reachable and narrow enough for the gripper"""
+    def is_selectable(position: Optional[np.ndarray], width: Optional[float]) -> bool:
+        return (
+            position is not None
+            and reachy_grasp.is_roughly_reachable(reachy, position)
+            and width is not None
+            and width <= reachy_grasp.GRIPPER_MAX_OPENING_M
+        )
+    return is_selectable
+
+
+# --- BoMI-cursor-driven selection flow ---
+def select_object_to_grasp_bomi(
+    cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
+    depth_cam, model, confidence, captured, reachy,
+):
+    """hover-to-select/hover-Refresh loop, where the hover point is the
+    BoMI cursor mapped into the captured frame"""
+    base_frame, detections, labels = captured
+    frame_h, frame_w = base_frame.shape[:2]
+
+    hovered_box = None
+    hover_start = None
+    button_hover_start = None
+
+    print(f"\n=== CAPTURED FRAME (RGB + YOLO) ===  Q = quit  |  "
+          f"hold Refresh for {REFRESH_HOVER_SECONDS:.0f}s to recapture")
+
+    while True:
+        _, crs_x, crs_y, _ = bomi_teleop.update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
+
+        gx, gy = bomi_teleop.map_bomi_to_frame(crs_x, crs_y, frame_w, frame_h)
+        now = time.time()
+
+        on_button = box_contains(REFRESH_BUTTON_BOX, gx, gy)
+        if not on_button:
+            button_hover_start = None
+        elif button_hover_start is None:
+            button_hover_start = now
+        elif now - button_hover_start >= REFRESH_HOVER_SECONDS:
+            refreshed = reachy_detection.capture_and_detect(depth_cam, model, confidence, presentable_filter(reachy))
+            if refreshed is not None:
+                base_frame, detections, labels = refreshed
+                frame_h, frame_w = base_frame.shape[:2]
+            hovered_box, hover_start = None, None
+            button_hover_start = None
+
+        frame = base_frame.copy()
+        hovered = find_hovered_detection(detections, gx, gy)
+
+        if hovered is None:
+            hovered_box, hover_start = None, None
+        else:
+            box = hovered[2]
+            if hovered_box is None or iou(box, hovered_box) < HOVER_IOU_MATCH:
+                hover_start = now
+            hovered_box = box
+        hover_duration = (now - hover_start) if hover_start is not None else 0.0
+        is_held = hovered is not None and hover_duration >= HOVER_HOLD_SECONDS
+
+        if is_held:
+            box = hovered[2]
+            reachy_detection.draw_box(frame, box, labels[box], reachy_detection.COLOR_GREEN)
+            _draw_bomi_cursor(frame, gx, gy)
+            cv2.imshow(reachy_detection.CAM_WINDOW_NAME, frame)
+            cv2.waitKey(1)
+            return hovered[0], box, (base_frame, detections, labels), crs_x, crs_y
+
+        hover_progress = min(hover_duration / HOVER_HOLD_SECONDS, 1.0) if hovered is not None else 0.0
+        for class_name, conf, box in detections:
+            is_hovered = hovered is not None and box == hovered[2]
+            color = COLOR_YELLOW if is_hovered else COLOR_BLUE
+            reachy_detection.draw_box(frame, box, labels[box], color, hover_progress if is_hovered else 0.0)
+
+        button_progress = min((now - button_hover_start) / REFRESH_HOVER_SECONDS, 1.0) if button_hover_start else 0.0
+        draw_refresh_button(frame, button_progress)
+        _draw_bomi_cursor(frame, gx, gy)
+        cv2.imshow(reachy_detection.CAM_WINDOW_NAME, frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if safety.quit_requested(key, reachy_detection.CAM_WINDOW_NAME):
+            return None, None, (base_frame, detections, labels), crs_x, crs_y
+
+
+def confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, class_name):
+    """Yes/No dwell dialog hovered with the BoMI cursor mapped into the confirm canvas"""
+    yes_hover_start = None
+    no_hover_start = None
+
+    while True:
+        _, crs_x, crs_y, _ = bomi_teleop.update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
+
+        gx, gy = bomi_teleop.map_bomi_to_frame(crs_x, crs_y, CONFIRM_CANVAS_WIDTH, CONFIRM_CANVAS_HEIGHT)
+        now = time.time()
+        on_yes = box_contains(YES_BUTTON_BOX, gx, gy)
+        on_no = box_contains(NO_BUTTON_BOX, gx, gy)
+
+        yes_hover_start = (yes_hover_start or now) if on_yes else None
+        no_hover_start = (no_hover_start or now) if on_no else None
+        yes_progress = min((now - yes_hover_start) / CONFIRM_HOVER_SECONDS, 1.0) if yes_hover_start else 0.0
+        no_progress = min((now - no_hover_start) / CONFIRM_HOVER_SECONDS, 1.0) if no_hover_start else 0.0
+
+        canvas = draw_confirm_canvas(class_name, yes_progress, no_progress)
+        _draw_bomi_cursor(canvas, gx, gy)
+        cv2.imshow(CONFIRM_WINDOW_NAME, canvas)
+
+        key = cv2.waitKey(1) & 0xFF
+        result = None
+        quit_now = safety.quit_requested(key, CONFIRM_WINDOW_NAME)
+        if yes_progress >= 1.0:
+            result = True
+        elif no_progress >= 1.0:
+            result = False
+
+        if quit_now or result is not None:
+            cv2.destroyWindow(CONFIRM_WINDOW_NAME)
+            return (None if quit_now else result), crs_x, crs_y
+
+
+# --- Used only for tests, when the BoMI ursor is replaced by the mouse --- 
+class MouseTracker:
+    """Tracks the latest mouse position over the given OpenCV window --
+    a standalone alternative to the BoMI cursor for driving the hover
+    geometry above from a real mouse (see tests/*.py)."""
+
+    def __init__(self, window_name: str) -> None:
+        self.x = -1
+        self.y = -1
+        cv2.namedWindow(window_name)
+        cv2.setMouseCallback(window_name, self._on_mouse)
+
+    def _on_mouse(self, event: int, x: int, y: int, flags: int, param: object) -> None:
+        self.x, self.y = x, y

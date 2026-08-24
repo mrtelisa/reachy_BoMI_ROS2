@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""
+Library module -- pre-grasping pose: sends both arms towards the
+pre-grasping posture (non-blocking) and waits for the move to finish,
+showing a progress-bar window while holding the mobile base at zero speed
+and keeping the BoMI cursor alive.
+"""
+
+import time
+
+import cv2
+import numpy as np
+
+import bomi_teleop
+import safety
+
+PRE_GRASP_ELBOW_PITCH_DEG = -135.0  # [deg], elbow pitch for the pre-grasping posture
+PRE_GRASP_MOVE_DURATION = 5.0       # [s], arm goto duration into the pre-grasping pose
+
+WAIT_WINDOW_NAME = "BoMI - Waiting"
+WAIT_CANVAS_WIDTH = 640
+WAIT_CANVAS_HEIGHT = 220
+
+
+def goto_pre_grasp_pose(reachy, duration: float = PRE_GRASP_MOVE_DURATION) -> list:
+    """Send both arms towards the pre-grasping posture, non-blocking. Returns the GoToIds
+    to poll for completion, skipping any arm that isn't reported or powered on."""
+    goto_ids = []
+    for arm in (reachy.r_arm, reachy.l_arm):
+        if arm is None or not arm.is_on():
+            continue
+        joints = arm.get_default_posture_joints(common_posture="elbow_90")
+        joints[3] = PRE_GRASP_ELBOW_PITCH_DEG
+        goto_ids.append(arm.goto(joints, duration=duration, wait=False))
+    return goto_ids
+
+
+def _draw_wait_canvas(progress: float) -> np.ndarray:
+    """Canvas shown while the arms move into the pre-grasping pose"""
+    canvas = np.full((WAIT_CANVAS_HEIGHT, WAIT_CANVAS_WIDTH, 3), 30, dtype=np.uint8)
+    cv2.putText(canvas, "Waiting for the robot",
+                (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+    cv2.putText(canvas, "to finished its movement",
+                (30, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+
+    bar_x1, bar_y1, bar_x2, bar_y2 = 30, 160, WAIT_CANVAS_WIDTH - 30, 190
+    cv2.rectangle(canvas, (bar_x1, bar_y1), (bar_x2, bar_y2), (90, 90, 90), 1)
+    filled_x = bar_x1 + int((bar_x2 - bar_x1) * progress)
+    cv2.rectangle(canvas, (bar_x1, bar_y1), (filled_x, bar_y2), (0, 255, 255), -1)
+    return canvas
+
+
+def wait_for_pre_grasp_pose(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, reachy, mobile_base, goto_ids):
+    """Blocks until every goto in goto_ids has finished, showing a dedicated
+    waiting window with a progress bar. The base is repeatedly held at zero
+    speed throughout. Returns the possibly updated cursor position and whether
+    the user quit."""
+    dt = 1.0 / bomi_teleop.PUBLISH_HZ
+    last_publish = time.time()
+    start = time.time()
+
+    while True:
+        _, crs_x, crs_y, _ = bomi_teleop.update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
+
+        progress = min((time.time() - start) / PRE_GRASP_MOVE_DURATION, 1.0)
+        cv2.imshow(WAIT_WINDOW_NAME, _draw_wait_canvas(progress))
+
+        now = time.time()
+        if now - last_publish >= dt:
+            mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
+            mobile_base.send_speed_command()
+            last_publish = now
+
+        key = cv2.waitKey(1) & 0xFF
+        if safety.quit_requested(key, WAIT_WINDOW_NAME):
+            cv2.destroyWindow(WAIT_WINDOW_NAME)
+            return crs_x, crs_y, True
+
+        if all(reachy.is_goto_finished(goto_id) for goto_id in goto_ids):
+            cv2.destroyWindow(WAIT_WINDOW_NAME)
+            return crs_x, crs_y, False
