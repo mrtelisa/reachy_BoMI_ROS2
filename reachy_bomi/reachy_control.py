@@ -23,9 +23,7 @@ Usage:
         --yolo-model PATH    YOLOv8 weights (.pt). Default: yolov8n.pt
         --conf FLOAT         Minimum YOLO detection confidence. Default: 0.5
 
-Camera streaming: Phase 3.5 spawns camera_viewer.py as its own OS process, 
-stopped the moment Phase 4 opens. Phase 4's look-before-you-grasp checkpoint
-streams the head camera in-process, blocking, via stream.stream_blocking.
+Camera streaming: Phase 3.5 and 4 spawn camera_viewer.py as their own OS process.
 
 Phases 1-2 (Calibration, Cursor preview): see bomi_teleop.py.
 
@@ -73,11 +71,10 @@ import reachy_grasp
 import reachy_pregrasp
 import reachy_selection
 import safety
-import stream
 import bomi_teleop
 
 # Placeholder — replace with the robot's actual IP
-DEFAULT_ROBOT_IP = "192.168.0.121"
+DEFAULT_ROBOT_IP = "10.186.13.148"
 
 # How long the cursor must stay in region 5 before Control moves to the next step
 SELECTION_HOLD_SECONDS = 5.0
@@ -89,8 +86,6 @@ HALVED_SPEED_FACTOR = 0.75 # max_lin = 0.375 [m/s], max_ang = 0.825 [rad/s]
 # camera_viewer.py (head camera, LEFT eye), spawned as its own process by
 # start_camera_viewer during Control/pre-grasping pose
 CAMERA_VIEWER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_viewer.py")
-
-CAMERA_CHECKPOINT_WINDOW_NAME = "Reachy - Head Camera (LEFT)"
 
 # global param to let _on_emergency_quit/main()'s block work,
 # however deep in the call stack the quit was triggered from.
@@ -122,16 +117,9 @@ def stop_camera_viewer() -> None:
     _camera_viewer_proc = None
 
 
-def _show_camera_viewer_blocking(reachy) -> None:
-    """Live head-camera feed shown in-process, blocking until Q/ESC/X --
-    used as a visual checkpoint before the arm moves. Runs in-process."""
-    stream.stream_blocking(reachy.cameras.teleop, CAMERA_CHECKPOINT_WINDOW_NAME, safety.quit_requested)
-    cv2.destroyWindow(CAMERA_CHECKPOINT_WINDOW_NAME)
-
-
 # --- Grasping flow ---
 def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, reachy, crs_x, crs_y,
-                     mobile_base):
+                     mobile_base, robot_ip):
     """capture -> hover-select -> confirm, looping back on "No" until an object is
     confirmed (then builds its point cloud, streams the live feed as a
     checkpoint, then plans and executes the grasp) or the user quits"""
@@ -162,8 +150,8 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
                 if geometry is not None:
                     print(f"[{class_name}] estimated width={geometry.width_m * 100:.1f}cm  "
                           f"height={geometry.height_m * 100:.1f}cm")
-                    # Live feed as a visual checkpoint before the arm moves
-                    _show_camera_viewer_blocking(reachy)
+                    # Live feed to see the scene while the arm moves
+                    start_camera_viewer(robot_ip)
                     plan = reachy_grasp.plan_grasp(reachy, geometry)
                     if plan is None:
                         print(f"[{class_name}] no feasible grasp (too wide for the gripper, "
@@ -189,6 +177,7 @@ def _place_back_and_wind_down(reachy, mobile_base, plan: reachy_grasp.GraspPlan)
 
     if reachy.head is not None:
         reachy.head.goto_posture(duration=1.0, wait=False)
+        stop_camera_viewer() # no-op if already stopped (Phase 4 switch stops it itself)
 
     print(f"\nRetracting both arms to the pre-grasping posture "
           f"(elbow pitch {reachy_pregrasp.PRE_GRASP_ELBOW_PITCH_DEG:.0f} deg)...")
@@ -209,7 +198,7 @@ def _place_back_and_wind_down(reachy, mobile_base, plan: reachy_grasp.GraspPlan)
 
 
 # --- BoMI control/navigation, with a dwell-in-center switch into grasp mode ---
-def teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, model, confidence, reachy,
+def teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, model, confidence, reachy, robot_ip,
                                cursor_filter=None, crs_x=None, crs_y=None) -> None:
     # Pass in the cursor_filter/crs_x/crs_y from the preceding cursor preview
     # to continue them, avoiding a velocity blip on entry.
@@ -298,7 +287,7 @@ def teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, 
             stop_camera_viewer()
             _run_grasp_mode(
                 cap, landmarker, bomi_map, cursor_filter, depth_cam, model, confidence, reachy, crs_x, crs_y,
-                mobile_base,
+                mobile_base, robot_ip,
             )
             break
 
@@ -416,7 +405,8 @@ def main() -> None:
             hold_seconds=SELECTION_HOLD_SECONDS,
         )
         teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, model,
-                                   cli_args.conf, reachy, cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y)
+                                   cli_args.conf, reachy, cli_args.robot_ip,
+                                   cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y)
     finally:
         stop_camera_viewer()
         if stop_terminal_watcher is not None:
