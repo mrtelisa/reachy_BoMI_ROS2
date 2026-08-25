@@ -83,6 +83,14 @@ SELECTION_HOLD_SECONDS = 5.0
 # pre-grasping pose
 HALVED_SPEED_FACTOR = 0.75 # max_lin = 0.375 [m/s], max_ang = 0.825 [rad/s] 
 
+# Neck pitch on power-on, applied on top of the "default" posture (whose own
+# neck pitch is -10 deg, i.e. looking slightly up) -- positive = look down.
+STARTUP_GAZE_PITCH_DEG = 30.0 # TODO find the right value
+
+# How far the base translates backward before rotating 180 deg at the end of
+# a successful grasp -- positive = backward
+REVERSE_BASE_CM = 15.0 # TODO find the right value
+
 # camera_viewer.py (head camera, LEFT eye), spawned as its own process by
 # start_camera_viewer during Control/pre-grasping pose
 CAMERA_VIEWER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_viewer.py")
@@ -188,7 +196,7 @@ def _place_back_and_wind_down(reachy, mobile_base, plan: reachy_grasp.GraspPlan)
     print(f"\nRotating the base {safety.SHUTDOWN_ROTATION_DEG:.0f} deg...")
     try:
         mobile_base.turn_on()
-        mobile_base.translate_by(x=-0.15, y=0.0, wait=True) #TODO: find a correct translation distance
+        mobile_base.translate_by(x=-REVERSE_BASE_CM / 100.0, y=0.0, wait=True) 
         mobile_base.rotate_by(safety.SHUTDOWN_ROTATION_DEG, wait=True)
     except Exception as exc:
         print(f"[WARN] Could not rotate the base ({exc}).")
@@ -398,6 +406,7 @@ def main() -> None:
         print("PCA map fitted")
         bring_window_to_front(bomi_teleop.MAP_WINDOW_NAME)
         start_camera_viewer(cli_args.robot_ip)
+        reachy.head.rotate_by(pitch=-STARTUP_GAZE_PITCH_DEG, yaw=0, roll=0, wait=False)  # look down
 
         cursor_filter = bomi_teleop.CursorFilter()
         crs_x, crs_y = bomi_teleop.cursor_preview_phase(
