@@ -144,7 +144,6 @@ class BoMIMap:
     
 
 # --- Velocity helpers ---
-
 def check_region_cursor(crs_x: float, crs_y: float) -> int:
     """
     Returns region 1-9 based on 3x3 grid over BASE_WIDTH x BASE_HEIGHT.

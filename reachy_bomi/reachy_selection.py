@@ -252,7 +252,7 @@ def confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, c
             return (None if quit_now else result), crs_x, crs_y
 
 
-# --- Used only for tests, when the BoMI ursor is replaced by the mouse --- 
+# --- Used only for tests, when the BoMI cursor is replaced by the mouse --- 
 class MouseTracker:
     """Tracks the latest mouse position over the given OpenCV window --
     a standalone alternative to the BoMI cursor for driving the hover
