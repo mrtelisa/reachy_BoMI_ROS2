@@ -425,12 +425,26 @@ def main() -> None:
                         help=f"Path to YOLOv8 weights (default: {reachy_detection.YOLO_MODEL_PATH})")
     parser.add_argument("--conf", type=float, default=reachy_detection.YOLO_CONFIDENCE,
                         help=f"Minimum detection confidence (default: {reachy_detection.YOLO_CONFIDENCE})")
+    parser.add_argument("--calib", default=None,
+                        help="Name of a calibration saved by calibrate_bomi.py to load instead of "
+                             "running the calibration phase")
     cli_args = parser.parse_args()
 
     if not os.path.exists(cli_args.model):
         print(f"[ERROR] MediaPipe model not found: '{cli_args.model}'")
         print("        Download hand_landmarker.task and pass its path with --model.")
         sys.exit(1)
+
+    calib_path = None
+    if cli_args.calib:
+        calib_path = bomi_teleop.resolve_calib_path(cli_args.calib)
+        if not os.path.exists(calib_path):
+            print(f"[ERROR] No calibration file '{calib_path}' found.")
+            if os.path.isdir(bomi_teleop.CALIB_DIR):
+                available = [f for f in os.listdir(bomi_teleop.CALIB_DIR) if f.endswith(".npz")]
+                if available:
+                    print("        Available: " + ", ".join(sorted(available)))
+            sys.exit(1)
 
     reachy = ReachySDK(host=cli_args.robot_ip)
     if reachy.mobile_base is None:
@@ -493,9 +507,13 @@ def main() -> None:
         landmarker = hand_landmarker.HandLandmarker.create_from_options(landmarker_options)
 
         bomi_map = bomi_teleop.BoMIMap()
-        samples = bomi_teleop.calibration_phase(cap, landmarker)
-        bomi_map.fit(samples)
-        print("PCA map fitted")
+        if calib_path is not None:
+            bomi_map.load_map_bomi(calib_path)
+            print(f"Loaded calibration from {calib_path} (calibration phase skipped)")
+        else:
+            samples = bomi_teleop.calibration_phase(cap, landmarker)
+            bomi_map.fit(samples)
+            print("PCA map fitted")
         bring_window_to_front(bomi_teleop.MAP_WINDOW_NAME, MAP_WINDOW_POS)
         start_camera_viewer(cli_args.robot_ip)
         reachy.head.rotate_by(pitch=-STARTUP_GAZE_PITCH_DEG, yaw=0, roll=0, wait=False)  # look down

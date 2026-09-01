@@ -57,6 +57,20 @@ DEFAULT_MODEL_PATH = os.path.join(
 CAM_WINDOW_NAME = "BoMI - Camera"
 MAP_WINDOW_NAME = "BoMI - Cursor Map"
 
+# Saved BoMIMap calibrations (see BoMIMap.save_map_bomi/load_map_bomi) live in
+# a 'calibrations/' folder next to the package.
+CALIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "calibrations")
+
+
+def resolve_calib_path(name: str) -> str:
+    """Bare name -> calibrations/<name>.npz; a name that already contains a
+    path is used as-is (.npz appended either way if missing)."""
+    if not name.endswith(".npz"):
+        name += ".npz"
+    if os.path.dirname(name):
+        return name
+    return os.path.join(CALIB_DIR, name)
+
 
 class CursorFilter:
     """
@@ -142,7 +156,26 @@ class BoMIMap:
         crs_x = float(np.clip(cu[0], 0, BASE_WIDTH))
         crs_y = float(np.clip(cu[1], 0, BASE_HEIGHT))
         return crs_x, crs_y
-    
+
+    def save_map_bomi(self, path: str) -> None:
+        if not self.fitted:
+            raise RuntimeError("Cannot save an unfitted BoMIMap.")
+        np.savez(
+            path,
+            mean=self._mean,
+            components=self._components,
+            scale=self._scale,
+            offset=self._offset,
+        )
+
+    def load_map_bomi(self, path: str) -> None:
+        data = np.load(path)
+        self._mean = data["mean"]
+        self._components = data["components"]
+        self._scale = data["scale"]
+        self._offset = data["offset"]
+        self.fitted = True
+
 
 # --- Velocity helpers ---
 def check_region_cursor(crs_x: float, crs_y: float) -> int:
