@@ -29,8 +29,9 @@ import safety
 HAND_CONNECTIONS = hand_landmarker.HandLandmarksConnections.HAND_CONNECTIONS
 
 # --- Lidar safety ---
-LIDAR_SLOWDOWN_DISTANCE = 0.7   # m
-LIDAR_CRITICAL_DISTANCE = 0.55  # m
+LIDAR_SLOWDOWN_DISTANCE = 0.7   # [m]
+LIDAR_CRITICAL_DISTANCE = 0.55  # [m], when navigating freely
+LIDAR_CRITICAL_DISTANCE_SLOWDOWN = 0.15  # [m], when approaching the object
 
 # --- Virtual screen dimensions ---
 BASE_WIDTH = 2550
