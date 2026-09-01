@@ -2,7 +2,7 @@
 """
 Library module -- hover-to-select/confirm UI for a detected object: maps a
 hover point onto reachy_detection.py's YOLO boxes, drives the
-dwell-to-select/refresh/confirm flow, and draws the corresponding overlays.
+dwell-to-select/repositioning/confirm flow, and draws the corresponding overlays.
 
 select_object_to_grasp_bomi/confirm_grasp_bomi drive that hover point from a
 BoMI cursor (bomi_teleop.py). 
@@ -27,10 +27,13 @@ Box = reachy_detection.Box
 HOVER_HOLD_SECONDS = 5.0  # [s], time before a detection becomes "selected" for confirmation
 HOVER_IOU_MATCH = 0.3     # min overlap between frames to count as "still hovering the same object"
 
-REFRESH_BUTTON_BOX: Box = (10, 10, 260, 90)
-COLOR_BUTTON = (0, 0, 255)
+REPOSITIONING_BUTTON_BOX: Box = (10, 10, 260, 90)
+COLOR_BUTTON = (255, 0, 0)
 COLOR_BUTTON_TEXT = (255, 255, 255)
-REFRESH_HOVER_SECONDS = 5.0
+REPOSITIONING_HOVER_SECONDS = 5.0
+
+# Sentinel class_name for "user dwelled on Repositioning" - handled by reachy_control.py
+REPOSITION_REQUESTED = object()
 
 CONFIRM_WINDOW_NAME = "BoMI - Confirm Grasp"
 CONFIRM_CANVAS_WIDTH = 520
@@ -49,12 +52,12 @@ COLOR_YELLOW = (0, 255, 255)
 
 
 # --- Drawing windows and cursor ---
-def draw_refresh_button(frame: np.ndarray, progress: float = 0.0) -> None:
-    x1, y1, x2, y2 = REFRESH_BUTTON_BOX
+def draw_repositioning_button(frame: np.ndarray, progress: float = 0.0) -> None:
+    x1, y1, x2, y2 = REPOSITIONING_BUTTON_BOX
     cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_BUTTON, -1)
     cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_BUTTON_TEXT, 1)
 
-    text = "Refresh"
+    text = "Repositioning"
     font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 1.1, 2
     (text_w, text_h), _ = cv2.getTextSize(text, font, scale, thickness)
     text_x = x1 + ((x2 - x1) - text_w) // 2
@@ -149,8 +152,8 @@ def select_object_to_grasp_bomi(
     cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
     depth_cam, model, confidence, captured, reachy,
 ):
-    """hover-to-select/hover-Refresh loop, where the hover point is the
-    BoMI cursor mapped into the captured frame"""
+    """hover-to-select loop, where the hover point is the BoMI cursor mapped
+    into the captured frame"""
     base_frame, detections, labels = captured
     frame_h, frame_w = base_frame.shape[:2]
 
@@ -159,7 +162,7 @@ def select_object_to_grasp_bomi(
     button_hover_start = None
 
     print(f"\n=== CAPTURED FRAME (RGB + YOLO) ===  Q = quit  |  "
-          f"hold Refresh for {REFRESH_HOVER_SECONDS:.0f}s to recapture")
+          f"hold Repositioning for {REPOSITIONING_HOVER_SECONDS:.0f}s to reposition")
 
     while True:
         _, crs_x, crs_y, _ = bomi_teleop.update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
@@ -167,18 +170,11 @@ def select_object_to_grasp_bomi(
         gx, gy = bomi_teleop.map_bomi_to_frame(crs_x, crs_y, frame_w, frame_h)
         now = time.time()
 
-        on_button = box_contains(REFRESH_BUTTON_BOX, gx, gy)
-        if not on_button:
-            button_hover_start = None
-        elif button_hover_start is None:
-            button_hover_start = now
-        elif now - button_hover_start >= REFRESH_HOVER_SECONDS:
-            refreshed = reachy_detection.capture_and_detect(depth_cam, model, confidence, presentable_filter(reachy))
-            if refreshed is not None:
-                base_frame, detections, labels = refreshed
-                frame_h, frame_w = base_frame.shape[:2]
-            hovered_box, hover_start = None, None
-            button_hover_start = None
+        on_button = box_contains(REPOSITIONING_BUTTON_BOX, gx, gy)
+        button_hover_start = (button_hover_start or now) if on_button else None
+        button_progress = min((now - button_hover_start) / REPOSITIONING_HOVER_SECONDS, 1.0) if button_hover_start else 0.0
+        if button_progress >= 1.0:
+            return REPOSITION_REQUESTED, None, (base_frame, detections, labels), crs_x, crs_y
 
         frame = base_frame.copy()
         hovered = find_hovered_detection(detections, gx, gy)
@@ -207,8 +203,7 @@ def select_object_to_grasp_bomi(
             color = COLOR_YELLOW if is_hovered else COLOR_BLUE
             reachy_detection.draw_box(frame, box, labels[box], color, hover_progress if is_hovered else 0.0)
 
-        button_progress = min((now - button_hover_start) / REFRESH_HOVER_SECONDS, 1.0) if button_hover_start else 0.0
-        draw_refresh_button(frame, button_progress)
+        draw_repositioning_button(frame, button_progress)
         _draw_bomi_cursor(frame, gx, gy)
         cv2.imshow(reachy_detection.CAM_WINDOW_NAME, frame)
 

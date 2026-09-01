@@ -74,7 +74,7 @@ import safety
 import bomi_teleop
 
 # Placeholder — replace with the robot's actual IP
-DEFAULT_ROBOT_IP = "10.186.13.148"
+DEFAULT_ROBOT_IP = "130.251.6.85"
 
 # How long the cursor must stay in region 5 before Control moves to the next step
 SELECTION_HOLD_SECONDS = 5.0
@@ -84,8 +84,8 @@ SELECTION_HOLD_SECONDS = 5.0
 HALVED_SPEED_FACTOR = 0.75 # max_lin = 0.375 [m/s], max_ang = 0.825 [rad/s] 
 
 # Neck pitch on power-on, applied on top of the "default" posture (whose own
-# neck pitch is -10 deg, i.e. looking slightly up) -- positive = look down.
-STARTUP_GAZE_PITCH_DEG = 30.0 # TODO find the right value
+# neck pitch is -10 deg, i.e. looking slightly up) -- negative = look down.
+STARTUP_GAZE_PITCH_DEG = -15.0 
 
 # How far the base translates backward before rotating 180 deg at the end of
 # a successful grasp -- positive = backward
@@ -95,6 +95,9 @@ REVERSE_BASE_CM = 15.0 # TODO find the right value
 # start_camera_viewer during Control/pre-grasping pose
 CAMERA_VIEWER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_viewer.py")
 
+# Screen position (top-left corner) for the cursor map window
+MAP_WINDOW_POS = (0, 60)
+
 # global param to let _on_emergency_quit/main()'s block work,
 # however deep in the call stack the quit was triggered from.
 _in_grasp_phase = False # True for the duration of _run_grasp_mode
@@ -102,20 +105,25 @@ _camera_viewer_proc: Optional[subprocess.Popen] = None # head-camera-viewer subp
 
 
 # --- Windows and camera streaming functions ---
-def bring_window_to_front(window_name: str) -> None:
+def bring_window_to_front(window_name: str, pos: tuple = None) -> None:
     """Pins a cv2 window on top of every other window, staying pinned
-    so the window stays visible in front of the camera-viewer subprocess windows. 
-    Qt backend only; a harmless no-op elsewhere."""
+    so the window stays visible in front of the camera-viewer subprocess windows.
+    Qt backend only; a harmless no-op elsewhere. pos, if given, moves the
+    window to a fixed (x, y) screen position first."""
     cv2.namedWindow(window_name)
+    if pos is not None:
+        cv2.moveWindow(window_name, *pos)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
 
 
-def start_camera_viewer(robot_ip: str) -> None:
+def start_camera_viewer(robot_ip: str, camera: str = "teleop") -> None:
     """Spawns camera_viewer.py as its own OS process and returns
     immediately -- keeps its network round-trips (Camera.get_frame) out
-    of this process's own loops"""
+    of this process's own loops. camera is "teleop" (head) or "torso" (chest/depth)."""
     global _camera_viewer_proc
-    _camera_viewer_proc = subprocess.Popen([sys.executable, CAMERA_VIEWER_SCRIPT, robot_ip])
+    _camera_viewer_proc = subprocess.Popen(
+        [sys.executable, CAMERA_VIEWER_SCRIPT, robot_ip, "--camera", camera]
+    )
 
 
 def stop_camera_viewer() -> None:
@@ -145,6 +153,18 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
                 cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
                 depth_cam, model, confidence, captured, reachy,
             )
+            if class_name is reachy_selection.REPOSITION_REQUESTED:
+                crs_x, crs_y, quit_now = repositioning_navigation(
+                    cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, mobile_base, robot_ip,
+                )
+                if quit_now:
+                    break
+                captured = reachy_detection.capture_and_detect(
+                    depth_cam, model, confidence, reachy_selection.presentable_filter(reachy),
+                )
+                if captured is None:
+                    break
+                continue
             if class_name is None:
                 break
 
@@ -154,6 +174,9 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
             if decision is None:
                 break
             if decision:
+                mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
+                mobile_base.send_speed_command()
+                mobile_base.turn_off()
                 geometry = reachy_detection.build_object_point_cloud(depth_cam, class_name, box)
                 if geometry is not None:
                     print(f"[{class_name}] estimated width={geometry.width_m * 100:.1f}cm  "
@@ -246,9 +269,6 @@ def teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, 
             lin_vel, ang_vel = 0.0, 0.0
 
         now = time.time()
-        # Only increases dwell time while actively tracked and centered, so a
-        # dropped hand while the stale cursor happens to sit in region 5
-        # can't silently trigger the switch into the next step.
         center_hold_start = (center_hold_start or now) if (hand_detected and region == 5) else None
         center_progress = (
             min((now - center_hold_start) / SELECTION_HOLD_SECONDS, 1.0) if center_hold_start else 0.0
@@ -261,6 +281,8 @@ def teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, 
             # then resume Control at limited speed
             mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
             mobile_base.send_speed_command()
+            mobile_base.lidar.safety_critical_distance = bomi_teleop.LIDAR_CRITICAL_DISTANCE_SLOWDOWN
+                
             print("\nMoving arms to pre-grasping pose "
                   f"(elbow pitch {reachy_pregrasp.PRE_GRASP_ELBOW_PITCH_DEG:.0f} deg)...")
             goto_ids = reachy_pregrasp.goto_pre_grasp_pose(reachy)
@@ -285,12 +307,11 @@ def teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, 
             continue
 
         if center_progress >= 1.0 and pre_grasp_reached:
-            # Second dwell: switch to object selection mode; the base is powered
-            # off and Control never runs again.
+            # Second dwell: switch to object selection mode. The base is held at
+            # zero speed but stays powered on (needed for repositioning).
             mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
             mobile_base.send_speed_command()
-            mobile_base.turn_off()
-            print("\nMobile base powered off. Switching to object selection.")
+            print("\nMobile base held at zero speed. Switching to object selection.")
             cv2.destroyWindow(map_window)
             stop_camera_viewer()
             _run_grasp_mode(
@@ -315,6 +336,77 @@ def teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, 
     mobile_base.turn_off()
     cv2.destroyWindow(map_window)
     stop_camera_viewer()  # no-op if already stopped (Phase 4 switch stops it itself)
+
+
+# --- Repositioning: 9-region nav at minimum speed, torso camera, entered from object selection ---
+def repositioning_navigation(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, mobile_base, robot_ip) -> tuple:
+    """Same 9-region cursor UI as Control, with velocities pinned to
+    MIN_LINEAR/MIN_ANGULAR and torso/depth camera streaming. 
+    Returns (crs_x, crs_y, quit_now) once the cursor has been
+    held centered (region 5) for SELECTION_HOLD_SECONDS."""
+    dt = 1.0 / bomi_teleop.PUBLISH_HZ
+    last_publish = time.time()
+    map_window = bomi_teleop.MAP_WINDOW_NAME
+    region = bomi_teleop.check_region_cursor(crs_x, crs_y)
+    message = "lin_vel:0.000 ang_vel:0.000"
+    center_hold_start = None
+
+    print("\n=== REPOSITIONING ===  Q = quit  |  hold the cursor centered (region 5) "
+          f"for {SELECTION_HOLD_SECONDS:.0f}s to return to object selection")
+    bring_window_to_front(map_window, MAP_WINDOW_POS)  # re-positions it, since it was destroyed on the last exit
+    start_camera_viewer(robot_ip, camera="torso")
+
+    try:
+        # Preview first (robot not moving) so velocities only start once the
+        # cursor is confirmed centered, same as Control on entry/resume.
+        crs_x, crs_y = bomi_teleop.cursor_preview_phase(
+            cap, landmarker, bomi_map, cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y, show_cam=False,
+            hold_seconds=SELECTION_HOLD_SECONDS,
+        )
+        center_hold_start = None
+
+        while True:
+            _, crs_x, crs_y, hand_detected = bomi_teleop.update_bomi_cursor(
+                cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
+            )
+
+            if hand_detected:
+                region = bomi_teleop.check_region_cursor(crs_x, crs_y)
+                lin_vel, ang_vel = bomi_teleop.compute_dynamic_vel_from_cursor(
+                    crs_x, crs_y, max_linear=bomi_teleop.MIN_LINEAR, max_angular=bomi_teleop.MIN_ANGULAR,
+                )
+                lin_vel, ang_vel = bomi_teleop.apply_region_velocity_mask(region, lin_vel, ang_vel)
+            else:
+                lin_vel, ang_vel = 0.0, 0.0
+
+            now = time.time()
+            center_hold_start = (center_hold_start or now) if (hand_detected and region == 5) else None
+            center_progress = (
+                min((now - center_hold_start) / SELECTION_HOLD_SECONDS, 1.0) if center_hold_start else 0.0
+            )
+
+            cv2.imshow(map_window, bomi_teleop.draw_cursor_map(crs_x, crs_y, region, message))
+
+            if center_progress >= 1.0:
+                mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
+                mobile_base.send_speed_command()
+                cv2.destroyWindow(map_window)
+                return crs_x, crs_y, False
+
+            if now - last_publish >= dt:
+                message = f"lin_vel:{lin_vel:.3f} ang_vel:{ang_vel:.3f}"
+                mobile_base.set_goal_speed(vx=lin_vel, vy=0, vtheta=math.degrees(ang_vel))
+                mobile_base.send_speed_command()
+                last_publish = now
+
+            key = cv2.waitKey(1) & 0xFF
+            if safety.quit_requested(key, map_window):
+                mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
+                mobile_base.send_speed_command()
+                cv2.destroyWindow(map_window)
+                return crs_x, crs_y, True
+    finally:
+        stop_camera_viewer()
 
 
 # --- Entry point ---
@@ -404,7 +496,7 @@ def main() -> None:
         samples = bomi_teleop.calibration_phase(cap, landmarker)
         bomi_map.fit(samples)
         print("PCA map fitted")
-        bring_window_to_front(bomi_teleop.MAP_WINDOW_NAME)
+        bring_window_to_front(bomi_teleop.MAP_WINDOW_NAME, MAP_WINDOW_POS)
         start_camera_viewer(cli_args.robot_ip)
         reachy.head.rotate_by(pitch=-STARTUP_GAZE_PITCH_DEG, yaw=0, roll=0, wait=False)  # look down
 

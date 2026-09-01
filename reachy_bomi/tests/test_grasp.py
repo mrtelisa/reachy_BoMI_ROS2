@@ -73,8 +73,8 @@ def _select_object_to_grasp(
     (which hovers with the BoMI cursor instead) -- detect-and-hover loop on
     an already-captured frame. Returns the class name and its box once held
     green for HOVER_HOLD_SECONDS (or None, None if the user quit), plus the
-    possibly-refreshed (frame, detections, labels), so a later re-entry
-    (e.g. after answering "No") can reuse them without recapturing."""
+    (frame, detections, labels), so a later re-entry (e.g. after answering
+    "No") can reuse them without recapturing."""
     base_frame, detections, labels = captured
 
     mouse = reachy_selection.MouseTracker(reachy_detection.CAM_WINDOW_NAME)
@@ -83,20 +83,11 @@ def _select_object_to_grasp(
     button_hover_start: Optional[float] = None
 
     print(f"\n=== CAPTURED FRAME (RGB + YOLO) ===  Q = quit  |  "
-          f"hover Refresh for {reachy_selection.REFRESH_HOVER_SECONDS:.0f}s to recapture")
+          f"hover Reposition for {reachy_selection.REPOSITIONING_HOVER_SECONDS:.0f}s to reposition")
     while True:
         now = time.time()
-        on_button = reachy_selection.box_contains(reachy_selection.REFRESH_BUTTON_BOX, mouse.x, mouse.y)
-        if not on_button:
-            button_hover_start = None
-        elif button_hover_start is None:
-            button_hover_start = now
-        elif now - button_hover_start >= reachy_selection.REFRESH_HOVER_SECONDS:
-            refreshed = reachy_detection.capture_and_detect(depth_cam, model, confidence, reachy_selection.presentable_filter(reachy))
-            if refreshed is not None:
-                base_frame, detections, labels = refreshed
-            hovered_box, hover_start = None, None
-            button_hover_start = None
+        on_button = reachy_selection.box_contains(reachy_selection.REPOSITIONING_BUTTON_BOX, mouse.x, mouse.y)
+        button_hover_start = (button_hover_start or now) if on_button else None
 
         frame = base_frame.copy()
 
@@ -127,9 +118,9 @@ def _select_object_to_grasp(
             reachy_detection.draw_box(frame, box, labels[box], color, hover_progress if is_hovered else 0.0)
 
         button_progress = (
-            min((now - button_hover_start) / reachy_selection.REFRESH_HOVER_SECONDS, 1.0) if button_hover_start else 0.0
+            min((now - button_hover_start) / reachy_selection.REPOSITIONING_HOVER_SECONDS, 1.0) if button_hover_start else 0.0
         )
-        reachy_selection.draw_refresh_button(frame, button_progress)
+        reachy_selection.draw_repositioning_button(frame, button_progress)
         cv2.imshow(reachy_detection.CAM_WINDOW_NAME, frame)
 
         key = cv2.waitKey(1) & 0xFF
