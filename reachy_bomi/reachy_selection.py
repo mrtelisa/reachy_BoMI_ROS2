@@ -69,13 +69,11 @@ def draw_repositioning_button(frame: np.ndarray, progress: float = 0.0) -> None:
         cv2.rectangle(frame, (x1, y2 - 8), (x1 + bar_width, y2), COLOR_BUTTON_TEXT, -1)
 
 
-def draw_confirm_canvas(class_name: str, yes_progress: float, no_progress: float) -> np.ndarray:
+def draw_confirm_canvas(lines: List[str], yes_progress: float, no_progress: float) -> np.ndarray:
     canvas = np.full((CONFIRM_CANVAS_HEIGHT, CONFIRM_CANVAS_WIDTH, 3), 30, dtype=np.uint8)
 
-    cv2.putText(canvas, f"You have select the {class_name} to be grasped.",
-                (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.55, COLOR_BUTTON_TEXT, 1)
-    cv2.putText(canvas, "Do you want to confirm?",
-                (20, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_BUTTON_TEXT, 2)
+    for i, line in enumerate(lines):
+        cv2.putText(canvas, line, (20, 60 + i * 35), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_BUTTON_TEXT, 2)
 
     for box, label, color, progress in (
         (YES_BUTTON_BOX, "Yes", COLOR_YES, yes_progress),
@@ -212,13 +210,17 @@ def select_object_to_grasp_bomi(
             return None, None, (base_frame, detections, labels), crs_x, crs_y
 
 
-def confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, class_name):
-    """Yes/No dwell dialog hovered with the BoMI cursor mapped into the confirm canvas"""
+def confirm_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, lines: List[str], on_frame=None):
+    """Generic Yes/No dwell dialog hovered with the BoMI cursor mapped into the
+    confirm canvas, lines drawn top to bottom as the prompt.
+    on_frame, if given, is called with no arguments once per loop iteration."""
     yes_hover_start = None
     no_hover_start = None
 
     while True:
         _, crs_x, crs_y, _ = bomi_teleop.update_bomi_cursor(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y)
+        if on_frame is not None:
+            on_frame()
 
         gx, gy = bomi_teleop.map_bomi_to_frame(crs_x, crs_y, CONFIRM_CANVAS_WIDTH, CONFIRM_CANVAS_HEIGHT)
         now = time.time()
@@ -230,7 +232,7 @@ def confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, c
         yes_progress = min((now - yes_hover_start) / CONFIRM_HOVER_SECONDS, 1.0) if yes_hover_start else 0.0
         no_progress = min((now - no_hover_start) / CONFIRM_HOVER_SECONDS, 1.0) if no_hover_start else 0.0
 
-        canvas = draw_confirm_canvas(class_name, yes_progress, no_progress)
+        canvas = draw_confirm_canvas(lines, yes_progress, no_progress)
         _draw_bomi_cursor(canvas, gx, gy)
         cv2.imshow(CONFIRM_WINDOW_NAME, canvas)
 
@@ -245,6 +247,14 @@ def confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, c
         if quit_now or result is not None:
             cv2.destroyWindow(CONFIRM_WINDOW_NAME)
             return (None if quit_now else result), crs_x, crs_y
+
+
+def confirm_grasp_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, class_name):
+    """Yes/No dwell dialog confirming the selected object, before grasping."""
+    return confirm_bomi(
+        cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
+        lines=[f"You have select the {class_name} to be grasped.", "Do you want to confirm?"],
+    )
 
 
 # --- Used only for tests, when the BoMI cursor is replaced by the mouse --- 

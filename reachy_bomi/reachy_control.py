@@ -246,6 +246,10 @@ def teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, 
     speed_scale = 1.0
     pre_grasp_reached = False
 
+    def _hold_base_still() -> None:
+        mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
+        mobile_base.send_speed_command()
+
     print("\n=== CONTROL ===  Q = quit  |  hold the cursor centered (region 5) "
           f"for {SELECTION_HOLD_SECONDS:.0f}s to move to the pre-grasping pose")
 
@@ -277,7 +281,25 @@ def teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, 
         cv2.imshow(map_window, bomi_teleop.draw_cursor_map(crs_x, crs_y, region, message))
 
         if center_progress >= 1.0 and not pre_grasp_reached:
-            # First dwell: stop and hold here while the arms move to pre-grasping pose, 
+            decision, crs_x, crs_y = reachy_selection.confirm_bomi(
+                cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
+                lines=["Do you want to continue on the pipeline?"],
+                on_frame=_hold_base_still,
+            )
+            if decision is None:
+                break
+            center_hold_start = None
+            if not decision:
+                # Back to the previous navigation mode - through a cursor preview first
+                cursor_filter.reset(crs_x, crs_y)
+                crs_x, crs_y = bomi_teleop.cursor_preview_phase(
+                    cap, landmarker, bomi_map, cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y, show_cam=False,
+                    hold_seconds=SELECTION_HOLD_SECONDS,
+                )
+                center_hold_start = None
+                continue
+
+            # First dwell: stop and hold here while the arms move to pre-grasping pose,
             # then resume Control at limited speed
             mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
             mobile_base.send_speed_command()
@@ -307,6 +329,24 @@ def teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, 
             continue
 
         if center_progress >= 1.0 and pre_grasp_reached:
+            decision, crs_x, crs_y = reachy_selection.confirm_bomi(
+                cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y,
+                lines=["Do you want to continue on the pipeline?"],
+                on_frame=_hold_base_still,
+            )
+            if decision is None:
+                break
+            center_hold_start = None
+            if not decision:
+                # Back to the previous navigation mode - through a cursor preview first
+                cursor_filter.reset(crs_x, crs_y)
+                crs_x, crs_y = bomi_teleop.cursor_preview_phase(
+                    cap, landmarker, bomi_map, cursor_filter=cursor_filter, crs_x=crs_x, crs_y=crs_y, show_cam=False,
+                    hold_seconds=SELECTION_HOLD_SECONDS,
+                )
+                center_hold_start = None
+                continue
+
             # Second dwell: switch to object selection mode. The base is held at
             # zero speed but stays powered on (needed for repositioning).
             mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)

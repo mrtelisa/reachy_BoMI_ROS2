@@ -149,7 +149,10 @@ def _confirm_grasp(class_name: str) -> Optional[bool]:
 
         cv2.imshow(
             reachy_selection.CONFIRM_WINDOW_NAME,
-            reachy_selection.draw_confirm_canvas(class_name, yes_progress, no_progress),
+            reachy_selection.draw_confirm_canvas(
+                [f"You have select the {class_name} to be grasped.", "Do you want to confirm?"],
+                yes_progress, no_progress,
+            ),
         )
 
         key = cv2.waitKey(1) & 0xFF
