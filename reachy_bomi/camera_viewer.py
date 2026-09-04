@@ -21,10 +21,6 @@ DEFAULT_ROBOT_IP = "130.251.6.85"
 WINDOW_NAME_HEAD = "Reachy - Head Camera (LEFT)"
 WINDOW_NAME_TORSO = "Reachy - Torso Camera (LEFT)"
 
-# Screen position (top-left corner) -- kept in sync with reachy_control.MAP_WINDOW_POS
-# so this window lands beside the cursor map instead of spawning on top of it.
-WINDOW_POS = (660, 60)
-
 
 
 def main() -> None:
@@ -48,8 +44,8 @@ def main() -> None:
         reachy.disconnect()
         sys.exit(1)
 
-    cv2.namedWindow(window_name)
-    cv2.moveWindow(window_name, *WINDOW_POS)
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     try:
         stream.stream_blocking(camera, window_name, safety.quit_requested)

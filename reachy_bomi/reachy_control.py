@@ -77,7 +77,7 @@ import bomi_teleop
 DEFAULT_ROBOT_IP = "130.251.6.85"
 
 # How long the cursor must stay in region 5 before Control moves to the next step
-SELECTION_HOLD_SECONDS = 5.0
+SELECTION_HOLD_SECONDS = 3.0
 
 # Linear/angular velocity multiplier for Control once the arms are in the
 # pre-grasping pose
@@ -85,18 +85,18 @@ HALVED_SPEED_FACTOR = 0.75 # max_lin = 0.375 [m/s], max_ang = 0.825 [rad/s]
 
 # Neck pitch on power-on, applied on top of the "default" posture (whose own
 # neck pitch is -10 deg, i.e. looking slightly up) -- negative = look down.
-STARTUP_GAZE_PITCH_DEG = -15.0 
+STARTUP_GAZE_PITCH_DEG = -20.0 
 
 # How far the base translates backward before rotating 180 deg at the end of
 # a successful grasp -- positive = backward
-REVERSE_BASE_CM = 15.0 # TODO find the right value
+REVERSE_BASE_CM = 20.0 # TODO find the right value
 
 # camera_viewer.py (head camera, LEFT eye), spawned as its own process by
 # start_camera_viewer during Control/pre-grasping pose
 CAMERA_VIEWER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_viewer.py")
 
 # Screen position (top-left corner) for the cursor map window
-MAP_WINDOW_POS = (0, 60)
+MAP_WINDOW_POS = (0, 0)
 
 # global param to let _on_emergency_quit/main()'s block work,
 # however deep in the call stack the quit was triggered from.
@@ -113,6 +113,15 @@ def bring_window_to_front(window_name: str, pos: tuple = None) -> None:
     cv2.namedWindow(window_name)
     if pos is not None:
         cv2.moveWindow(window_name, *pos)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
+
+
+def make_window_fullscreen(window_name: str) -> None:
+    """Creates (or resizes) a cv2 window, pins it fullscreen and brings it to the
+    front. Re-call this on every newly captured frame -- other windows (e.g. the
+    editor) can otherwise steal focus over it while repositioning runs."""
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
 
 
@@ -142,6 +151,7 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
     global _in_grasp_phase
     _in_grasp_phase = True
     try:
+        make_window_fullscreen(reachy_detection.CAM_WINDOW_NAME)
         captured = reachy_detection.capture_and_detect(
             depth_cam, model, confidence, reachy_selection.presentable_filter(reachy),
         )
@@ -164,6 +174,7 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
                 )
                 if captured is None:
                     break
+                make_window_fullscreen(reachy_detection.CAM_WINDOW_NAME)
                 continue
             if class_name is None:
                 break
@@ -413,7 +424,7 @@ def repositioning_navigation(cap, landmarker, bomi_map, cursor_filter, crs_x, cr
             if hand_detected:
                 region = bomi_teleop.check_region_cursor(crs_x, crs_y)
                 lin_vel, ang_vel = bomi_teleop.compute_dynamic_vel_from_cursor(
-                    crs_x, crs_y, max_linear=bomi_teleop.MIN_LINEAR, max_angular=bomi_teleop.MIN_ANGULAR,
+                    crs_x, crs_y, max_linear=0.22, max_angular=0.9,
                 )
                 lin_vel, ang_vel = bomi_teleop.apply_region_velocity_mask(region, lin_vel, ang_vel)
             else:

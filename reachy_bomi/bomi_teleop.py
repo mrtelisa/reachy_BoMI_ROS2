@@ -289,7 +289,7 @@ def _draw_hand_landmarks(frame, landmarks) -> None:
 
 
 def draw_cursor_map(crs_x: float, crs_y: float, region: int, message: str,
-                      map_width: int = 638, map_height: int = 375):
+                      map_width: int = 510, map_height: int = 300):
     """Rectangle representing the BASE_WIDTH x BASE_HEIGHT virtual screen, with
     the 9-region grid lines, a dot at the current cursor position, and the
     lin_vel/ang_vel message currently being sent to the mobile base."""
@@ -357,6 +357,8 @@ def calibration_phase(cap, landmarker) -> list:
     print("Move your hand through all positions you intend to use.")
     print("SPACE = record sample   |   ENTER = finish (need >= 30)   |   Q = quit")
 
+    last_landmarks = None  # most recent detection, so a keypress landing on a
+                            # dropout frame (tracking flickers frame to frame) doesn't silently lose the sample
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -367,7 +369,8 @@ def calibration_phase(cap, landmarker) -> list:
         results = landmarker.detect_for_video(mp_image, int(time.time() * 1000))
 
         if results.hand_landmarks:
-            _draw_hand_landmarks(frame, results.hand_landmarks[0])
+            last_landmarks = results.hand_landmarks[0]
+            _draw_hand_landmarks(frame, last_landmarks)
 
         label = f"Samples: {len(samples)}/{MIN_SAMPLES}  SPACE=add  ENTER=done  Q=quit"
         cv2.putText(frame, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
@@ -375,9 +378,12 @@ def calibration_phase(cap, landmarker) -> list:
         cv2.imshow(window_name, frame)
         key = cv2.waitKey(1) & 0xFF
 
-        if key == ord(' ') and results.hand_landmarks:
-            samples.append(_extract_hand_features(results.hand_landmarks[0]))
-            print(f"  Sample {len(samples)} recorded")
+        if key == ord(' '):
+            if last_landmarks is not None:
+                samples.append(_extract_hand_features(last_landmarks))
+                print(f"  Sample {len(samples)} recorded")
+            else:
+                print("  SPACE ignored: no hand detected yet")
 
         elif key == 13:  # ENTER
             if len(samples) >= MIN_SAMPLES:
