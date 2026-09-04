@@ -424,7 +424,7 @@ def repositioning_navigation(cap, landmarker, bomi_map, cursor_filter, crs_x, cr
             if hand_detected:
                 region = bomi_teleop.check_region_cursor(crs_x, crs_y)
                 lin_vel, ang_vel = bomi_teleop.compute_dynamic_vel_from_cursor(
-                    crs_x, crs_y, max_linear=0.22, max_angular=0.9,
+                    crs_x, crs_y, max_linear=bomi_teleop.MIN_LINEAR, max_angular=bomi_teleop.MIN_ANGULAR,
                 )
                 lin_vel, ang_vel = bomi_teleop.apply_region_velocity_mask(region, lin_vel, ang_vel)
             else:

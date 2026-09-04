@@ -38,9 +38,9 @@ BASE_WIDTH = 2550
 BASE_HEIGHT = 1500
 
 # MIN_LINEAR/MIN_ANGULAR to let the mobile base's wheels overcome their own resistance 
-MIN_LINEAR = 0.15      # [m/s]
+MIN_LINEAR = 0.2      # [m/s]
 MAX_LINEAR = 0.5      # [m/s]
-MIN_ANGULAR = 0.6     # [rad/s]
+MIN_ANGULAR = 0.8     # [rad/s]
 MAX_ANGULAR = 1.1     # [rad/s]
 
 DEAD_ZONE_PX = 200    # pixel radius around screen center before motion starts
