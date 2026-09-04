@@ -20,8 +20,9 @@ import tty
 import cv2
 from reachy2_sdk import ReachySDK
 
-# How much the base rotates in place  before powering down, when
-# rotate_base_before_shutdown is set to True
+# How far the base translates backward, then how much it rotates in place,
+# before powering down, when rotate_base_before_shutdown is set to True
+SHUTDOWN_REVERSE_CM = 20.0
 SHUTDOWN_ROTATION_DEG = 180.0
 
 
@@ -99,9 +100,10 @@ def start_terminal_quit_watcher(on_quit):
 def safe_robot_shutdown(reachy: ReachySDK, mobile_base=None, rotate_base_before_shutdown: bool = False) -> None:
     """Stop the base, then power down smoothly. Swallows exceptions.
 
-    rotate_base_before_shutdown=True rotates the base SHUTDOWN_ROTATION_DEG
-    in place first -- pass this whenever the robot may be sitting close to 
-    a table with its arms about to fold in, so they don't fold into it."""
+    rotate_base_before_shutdown=True translates the base back SHUTDOWN_REVERSE_CM
+    then rotates it SHUTDOWN_ROTATION_DEG in place first -- pass this whenever
+    the robot may be sitting close to a table with its arms about to fold in,
+    so they don't fold into it."""
     if mobile_base is not None:
         try:
             mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)
@@ -112,6 +114,7 @@ def safe_robot_shutdown(reachy: ReachySDK, mobile_base=None, rotate_base_before_
     if rotate_base_before_shutdown and mobile_base is not None:
         try:
             mobile_base.turn_on()
+            mobile_base.translate_by(x=-SHUTDOWN_REVERSE_CM / 100.0, y=0.0, wait=True)
             mobile_base.rotate_by(SHUTDOWN_ROTATION_DEG, wait=True)
         except Exception:
             pass
