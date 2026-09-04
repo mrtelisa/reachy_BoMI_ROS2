@@ -77,7 +77,7 @@ import bomi_teleop
 DEFAULT_ROBOT_IP = "130.251.6.85"
 
 # How long the cursor must stay in region 5 before Control moves to the next step
-SELECTION_HOLD_SECONDS = 3.0
+SELECTION_HOLD_SECONDS = reachy_selection.DWELL_HOLD_SECONDS
 
 # Linear/angular velocity multiplier for Control once the arms are in the
 # pre-grasping pose

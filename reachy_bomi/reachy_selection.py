@@ -24,13 +24,16 @@ import safety
 
 Box = reachy_detection.Box
 
-HOVER_HOLD_SECONDS = 5.0  # [s], time before a detection becomes "selected" for confirmation
+# [s], single dwell time for all hover-to-select/confirm interactions
+DWELL_HOLD_SECONDS = 3.0
+
+HOVER_HOLD_SECONDS = DWELL_HOLD_SECONDS
 HOVER_IOU_MATCH = 0.3     # min overlap between frames to count as "still hovering the same object"
 
 REPOSITIONING_BUTTON_BOX: Box = (10, 10, 260, 90)
 COLOR_BUTTON = (255, 0, 0)
 COLOR_BUTTON_TEXT = (255, 255, 255)
-REPOSITIONING_HOVER_SECONDS = 5.0
+REPOSITIONING_HOVER_SECONDS = DWELL_HOLD_SECONDS
 
 # Sentinel class_name for "user dwelled on Repositioning" - handled by reachy_control.py
 REPOSITION_REQUESTED = object()
@@ -38,7 +41,7 @@ REPOSITION_REQUESTED = object()
 CONFIRM_WINDOW_NAME = "BoMI - Confirm Grasp"
 CONFIRM_CANVAS_WIDTH = 520
 CONFIRM_CANVAS_HEIGHT = 260
-CONFIRM_HOVER_SECONDS = 5.0
+CONFIRM_HOVER_SECONDS = DWELL_HOLD_SECONDS
 YES_BUTTON_BOX: Box = (60, 150, 240, 220)
 NO_BUTTON_BOX: Box = (280, 150, 460, 220)
 COLOR_YES = (0, 200, 0)
