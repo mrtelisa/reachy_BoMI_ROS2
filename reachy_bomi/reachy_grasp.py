@@ -28,8 +28,12 @@ GRASP_LIFT_M = 0.15
 ARM_GOTO_DURATION_S = 6.0
 
 # How far outside the object's near surface (beyond its radius) the
-# commanded EE position sits
-GRASP_APPROACH_MARGIN_M = 0.0
+# commanded EE position sits, per arm -- the left arm has been observed to
+# fall consistently a bit short of the commanded pose, dropping the object,
+# so it gets a negative margin (reaches past the surface) to compensate
+GRASP_APPROACH_MARGIN_DX_M = 0.0  # r_arm
+GRASP_APPROACH_MARGIN_SX_M = -0.04  # l_arm TODO: find right value
+_GRASP_APPROACH_MARGIN_BY_ARM = {"r_arm": GRASP_APPROACH_MARGIN_DX_M, "l_arm": GRASP_APPROACH_MARGIN_SX_M}
 
 # Fallback "up" direction (Reachy world frame) when the table plane fit fails 
 DEFAULT_TABLE_NORMAL: npt.NDArray[np.float64] = np.array([0.0, 0.0, 1.0])
@@ -199,8 +203,9 @@ def plan_grasp(reachy: ReachySDK, geometry: ObjectGeometry) -> Optional[GraspPla
     )
     radius = geometry.width_m / 2.0
 
-    def _pregrasp_grasp_rotation_for(approach: npt.NDArray[np.float64]):
-        grasp_position = mid_position - (radius + GRASP_APPROACH_MARGIN_M) * approach
+    def _pregrasp_grasp_rotation_for(approach: npt.NDArray[np.float64], arm_name: str):
+        margin = _GRASP_APPROACH_MARGIN_BY_ARM[arm_name]
+        grasp_position = mid_position - (radius + margin) * approach
         pregrasp_position = grasp_position - approach * PREGRASP_STANDOFF_M
         rotation = _orientation_from_approach(approach, _side_grasp_closing_axis(approach, table_normal))
         return pregrasp_position, grasp_position, rotation
@@ -212,7 +217,7 @@ def plan_grasp(reachy: ReachySDK, geometry: ObjectGeometry) -> Optional[GraspPla
     # direct line, near-side arm
     arm_name = near_side
     approach = _approach_candidates(mid_position, table_normal)[0]
-    pregrasp_position, grasp_position, rotation = _pregrasp_grasp_rotation_for(approach)
+    pregrasp_position, grasp_position, rotation = _pregrasp_grasp_rotation_for(approach, arm_name)
 
     found = False
     for candidate_arm_name in (near_side, far_side):
@@ -221,7 +226,7 @@ def plan_grasp(reachy: ReachySDK, geometry: ObjectGeometry) -> Optional[GraspPla
             continue
         for candidate_approach in _approach_candidates(mid_position, table_normal):
             candidate_pregrasp_position, candidate_grasp_position, candidate_rotation = \
-                _pregrasp_grasp_rotation_for(candidate_approach)
+                _pregrasp_grasp_rotation_for(candidate_approach, candidate_arm_name)
             try:
                 arm.inverse_kinematics(_pose_matrix(candidate_rotation, candidate_pregrasp_position))
                 arm.inverse_kinematics(_pose_matrix(candidate_rotation, candidate_grasp_position))
