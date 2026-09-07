@@ -58,7 +58,12 @@ import sys
 import time
 from typing import Optional
 
+# Force XWayland so cv2's fullscreen/topmost window hints actually work (must be
+# set before cv2 creates a window; camera_viewer.py inherits this too)
+os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+
 import cv2
+import numpy as np
 from mediapipe.tasks.python.core import base_options
 from mediapipe.tasks.python.vision import hand_landmarker
 from mediapipe.tasks.python.vision.core import vision_task_running_mode
@@ -121,6 +126,9 @@ def make_window_fullscreen(window_name: str) -> None:
     front. Re-call this on every newly captured frame -- other windows (e.g. the
     editor) can otherwise steal focus over it while repositioning runs."""
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    # A window needs at least one rendered frame before FULLSCREEN sticks
+    cv2.imshow(window_name, np.zeros((2, 2, 3), dtype="uint8"))
+    cv2.waitKey(1)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
 
@@ -290,6 +298,7 @@ def teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, 
         )
 
         cv2.imshow(map_window, bomi_teleop.draw_cursor_map(crs_x, crs_y, region, message))
+        cv2.setWindowProperty(map_window, cv2.WND_PROP_TOPMOST, 1)  # re-pin over the fullscreen camera_viewer window
 
         if center_progress >= 1.0 and not pre_grasp_reached:
             decision, crs_x, crs_y = reachy_selection.confirm_bomi(
@@ -437,6 +446,7 @@ def repositioning_navigation(cap, landmarker, bomi_map, cursor_filter, crs_x, cr
             )
 
             cv2.imshow(map_window, bomi_teleop.draw_cursor_map(crs_x, crs_y, region, message))
+            cv2.setWindowProperty(map_window, cv2.WND_PROP_TOPMOST, 1)  # re-pin over the fullscreen camera_viewer window
 
             if center_progress >= 1.0:
                 mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)

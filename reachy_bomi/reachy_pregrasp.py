@@ -64,6 +64,7 @@ def wait_for_pre_grasp_pose(cap, landmarker, bomi_map, cursor_filter, crs_x, crs
 
         progress = min((time.time() - start) / PRE_GRASP_MOVE_DURATION, 1.0)
         cv2.imshow(WAIT_WINDOW_NAME, _draw_wait_canvas(progress))
+        cv2.setWindowProperty(WAIT_WINDOW_NAME, cv2.WND_PROP_TOPMOST, 1)  # re-pin over the fullscreen camera_viewer window
 
         now = time.time()
         if now - last_publish >= dt:

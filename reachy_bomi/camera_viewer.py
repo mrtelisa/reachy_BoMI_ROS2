@@ -9,9 +9,15 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 
+# Force XWayland so cv2's fullscreen/topmost window hints actually work (must be
+# set before cv2 creates a window; set here too in case this runs standalone)
+os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+
 import cv2
+import numpy as np
 from reachy2_sdk import ReachySDK
 
 import safety
@@ -45,6 +51,9 @@ def main() -> None:
         sys.exit(1)
 
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    # A window needs at least one rendered frame before FULLSCREEN sticks
+    cv2.imshow(window_name, np.zeros((2, 2, 3), dtype="uint8"))
+    cv2.waitKey(1)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     try:
