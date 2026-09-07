@@ -12,9 +12,11 @@ a cv2 window has OS focus and the caller's own loop is actively polling it:
 
 import os
 import select
+import subprocess
 import sys
 import termios
 import threading
+import time
 import tty
 
 import cv2
@@ -24,6 +26,53 @@ from reachy2_sdk import ReachySDK
 # before powering down, when rotate_base_before_shutdown is set to True
 SHUTDOWN_REVERSE_CM = 20.0
 SHUTDOWN_ROTATION_DEG = 180.0
+
+_wmctrl_missing_warned = False
+
+
+def force_fullscreen(window_name: str) -> None:
+    """Requests the EWMH fullscreen state via wmctrl. Some Qt/opencv-python
+    builds report cv2's own WND_PROP_FULLSCREEN as set without Mutter ever
+    actually resizing the window -- this bypasses that by asking the WM
+    directly. Call once, after the window is first shown. No-ops (after one
+    warning) if wmctrl isn't installed."""
+    global _wmctrl_missing_warned
+    try:
+        subprocess.run(["wmctrl", "-r", window_name, "-b", "add,fullscreen"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        if not _wmctrl_missing_warned:
+            print("[WARN] wmctrl not installed -- camera windows may not go fullscreen "
+                  "(sudo apt install wmctrl).")
+            _wmctrl_missing_warned = True
+
+
+# Throttle for raise_window -- meant to be called every display-loop frame,
+# but should only actually spawn wmctrl a few times a second
+_RAISE_WINDOW_INTERVAL_S = 0.5
+_last_raise_time: dict = {}
+
+
+def raise_window(window_name: str) -> None:
+    """Actively re-activates a window by title via wmctrl -- the same action
+    as alt-tabbing to it. Needed because cv2's own WND_PROP_TOPMOST only
+    beats another window from the *same process*; confirmed it silently
+    loses to a fullscreen window from a different process (e.g.
+    camera_viewer.py's subprocess), which this fixes. Safe to call every
+    frame -- throttled internally. No-ops (after one warning) if wmctrl
+    isn't installed."""
+    global _wmctrl_missing_warned
+    now = time.time()
+    if now - _last_raise_time.get(window_name, 0.0) < _RAISE_WINDOW_INTERVAL_S:
+        return
+    _last_raise_time[window_name] = now
+    try:
+        subprocess.run(["wmctrl", "-a", window_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        if not _wmctrl_missing_warned:
+            print("[WARN] wmctrl not installed -- windows may not come to the front "
+                  "(sudo apt install wmctrl).")
+            _wmctrl_missing_warned = True
 
 
 def quit_requested(key: int, window_name: str) -> bool:

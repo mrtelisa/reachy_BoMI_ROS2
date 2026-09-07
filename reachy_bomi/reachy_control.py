@@ -130,6 +130,7 @@ def make_window_fullscreen(window_name: str) -> None:
     cv2.imshow(window_name, np.zeros((2, 2, 3), dtype="uint8"))
     cv2.waitKey(1)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    safety.force_fullscreen(window_name)  # some Qt builds ignore the request above; ask the WM directly too
     cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
 
 
@@ -177,12 +178,12 @@ def _run_grasp_mode(cap, landmarker, bomi_map, cursor_filter, depth_cam, model, 
                 )
                 if quit_now:
                     break
+                make_window_fullscreen(reachy_detection.CAM_WINDOW_NAME)
                 captured = reachy_detection.capture_and_detect(
                     depth_cam, model, confidence, reachy_selection.presentable_filter(reachy),
                 )
                 if captured is None:
                     break
-                make_window_fullscreen(reachy_detection.CAM_WINDOW_NAME)
                 continue
             if class_name is None:
                 break
@@ -298,7 +299,8 @@ def teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, 
         )
 
         cv2.imshow(map_window, bomi_teleop.draw_cursor_map(crs_x, crs_y, region, message))
-        cv2.setWindowProperty(map_window, cv2.WND_PROP_TOPMOST, 1)  # re-pin over the fullscreen camera_viewer window
+        cv2.setWindowProperty(map_window, cv2.WND_PROP_TOPMOST, 1)  # re-pin (same-process windows only)
+        safety.raise_window(map_window)  # actually wins over the cross-process fullscreen camera_viewer window
 
         if center_progress >= 1.0 and not pre_grasp_reached:
             decision, crs_x, crs_y = reachy_selection.confirm_bomi(
@@ -413,6 +415,9 @@ def repositioning_navigation(cap, landmarker, bomi_map, cursor_filter, crs_x, cr
 
     print("\n=== REPOSITIONING ===  Q = quit  |  hold the cursor centered (region 5) "
           f"for {SELECTION_HOLD_SECONDS:.0f}s to return to object selection")
+    # Let the torso stream (and the map, re-pinned every frame below) cover the
+    # object-selection window instead of fighting it for the top spot
+    cv2.setWindowProperty(reachy_detection.CAM_WINDOW_NAME, cv2.WND_PROP_TOPMOST, 0)
     bring_window_to_front(map_window, MAP_WINDOW_POS)  # re-positions it, since it was destroyed on the last exit
     start_camera_viewer(robot_ip, camera="torso")
 
@@ -446,7 +451,8 @@ def repositioning_navigation(cap, landmarker, bomi_map, cursor_filter, crs_x, cr
             )
 
             cv2.imshow(map_window, bomi_teleop.draw_cursor_map(crs_x, crs_y, region, message))
-            cv2.setWindowProperty(map_window, cv2.WND_PROP_TOPMOST, 1)  # re-pin over the fullscreen camera_viewer window
+            cv2.setWindowProperty(map_window, cv2.WND_PROP_TOPMOST, 1)  # re-pin (same-process windows only)
+            safety.raise_window(map_window)  # actually wins over the cross-process fullscreen camera_viewer window
 
             if center_progress >= 1.0:
                 mobile_base.set_goal_speed(vx=0, vy=0, vtheta=0)

@@ -55,6 +55,7 @@ def main() -> None:
     cv2.imshow(window_name, np.zeros((2, 2, 3), dtype="uint8"))
     cv2.waitKey(1)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    safety.force_fullscreen(window_name)  # some Qt builds ignore the request above; ask the WM directly too
 
     try:
         stream.stream_blocking(camera, window_name, safety.quit_requested)

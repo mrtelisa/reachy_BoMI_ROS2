@@ -451,7 +451,8 @@ def cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: Curs
         if show_cam:
             cv2.imshow(cam_window, frame)
         cv2.imshow(map_window, draw_cursor_map(crs_x, crs_y, region, "(preview - not sent)"))
-        cv2.setWindowProperty(map_window, cv2.WND_PROP_TOPMOST, 1)  # re-pin over the fullscreen camera_viewer window
+        cv2.setWindowProperty(map_window, cv2.WND_PROP_TOPMOST, 1)  # re-pin (same-process windows only)
+        safety.raise_window(map_window)  # actually wins over the cross-process fullscreen camera_viewer window
         if on_frame is not None:
             on_frame()
 

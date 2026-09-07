@@ -238,7 +238,8 @@ def confirm_bomi(cap, landmarker, bomi_map, cursor_filter, crs_x, crs_y, lines: 
         canvas = draw_confirm_canvas(lines, yes_progress, no_progress)
         _draw_bomi_cursor(canvas, gx, gy)
         cv2.imshow(CONFIRM_WINDOW_NAME, canvas)
-        cv2.setWindowProperty(CONFIRM_WINDOW_NAME, cv2.WND_PROP_TOPMOST, 1)  # re-pin over the fullscreen camera_viewer window
+        cv2.setWindowProperty(CONFIRM_WINDOW_NAME, cv2.WND_PROP_TOPMOST, 1)  # re-pin (same-process windows only)
+        safety.raise_window(CONFIRM_WINDOW_NAME)  # actually wins over the cross-process fullscreen camera_viewer window
 
         key = cv2.waitKey(1) & 0xFF
         result = None
