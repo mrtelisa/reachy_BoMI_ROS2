@@ -57,6 +57,9 @@ DEFAULT_MODEL_PATH = os.path.join(
 CAM_WINDOW_NAME = "BoMI - Camera"
 MAP_WINDOW_NAME = "BoMI - Cursor Map"
 
+# Screen position (top-left corner) the map window is pinned to
+MAP_WINDOW_POS = (0, 0)
+
 # Saved BoMIMap calibrations (see BoMIMap.save_map_bomi/load_map_bomi) live in
 # a 'calibrations/' folder next to the package.
 CALIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "calibrations")
@@ -451,6 +454,7 @@ def cursor_preview_phase(cap, landmarker, bomi_map: BoMIMap, cursor_filter: Curs
         if show_cam:
             cv2.imshow(cam_window, frame)
         cv2.imshow(map_window, draw_cursor_map(crs_x, crs_y, region, "(preview - not sent)"))
+        cv2.moveWindow(map_window, *MAP_WINDOW_POS)  # a just-closed window can make the WM reclaim the position otherwise
         cv2.setWindowProperty(map_window, cv2.WND_PROP_TOPMOST, 1)  # re-pin (same-process windows only)
         safety.raise_window(map_window)  # actually wins over the cross-process fullscreen camera_viewer window
         if on_frame is not None:

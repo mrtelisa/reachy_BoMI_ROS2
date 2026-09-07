@@ -100,9 +100,6 @@ REVERSE_BASE_CM = 20.0 # TODO find the right value
 # start_camera_viewer during Control/pre-grasping pose
 CAMERA_VIEWER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_viewer.py")
 
-# Screen position (top-left corner) for the cursor map window
-MAP_WINDOW_POS = (0, 0)
-
 # global param to let _on_emergency_quit/main()'s block work,
 # however deep in the call stack the quit was triggered from.
 _in_grasp_phase = False # True for the duration of _run_grasp_mode
@@ -116,6 +113,8 @@ def bring_window_to_front(window_name: str, pos: tuple = None) -> None:
     Qt backend only; a harmless no-op elsewhere. pos, if given, moves the
     window to a fixed (x, y) screen position first."""
     cv2.namedWindow(window_name)
+    cv2.imshow(window_name, np.zeros((300, 510, 3), dtype="uint8"))  # match draw_cursor_map's size, or the move below gets undone
+    cv2.waitKey(1)
     if pos is not None:
         cv2.moveWindow(window_name, *pos)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
@@ -299,6 +298,7 @@ def teleop_with_grasp_switch(cap, landmarker, bomi_map, mobile_base, depth_cam, 
         )
 
         cv2.imshow(map_window, bomi_teleop.draw_cursor_map(crs_x, crs_y, region, message))
+        cv2.moveWindow(map_window, *bomi_teleop.MAP_WINDOW_POS)  # a just-closed window can make the WM reclaim the position otherwise
         cv2.setWindowProperty(map_window, cv2.WND_PROP_TOPMOST, 1)  # re-pin (same-process windows only)
         safety.raise_window(map_window)  # actually wins over the cross-process fullscreen camera_viewer window
 
@@ -418,7 +418,7 @@ def repositioning_navigation(cap, landmarker, bomi_map, cursor_filter, crs_x, cr
     # Let the torso stream (and the map, re-pinned every frame below) cover the
     # object-selection window instead of fighting it for the top spot
     cv2.setWindowProperty(reachy_detection.CAM_WINDOW_NAME, cv2.WND_PROP_TOPMOST, 0)
-    bring_window_to_front(map_window, MAP_WINDOW_POS)  # re-positions it, since it was destroyed on the last exit
+    bring_window_to_front(map_window, bomi_teleop.MAP_WINDOW_POS)  # re-positions it, since it was destroyed on the last exit
     start_camera_viewer(robot_ip, camera="torso")
 
     try:
@@ -451,6 +451,7 @@ def repositioning_navigation(cap, landmarker, bomi_map, cursor_filter, crs_x, cr
             )
 
             cv2.imshow(map_window, bomi_teleop.draw_cursor_map(crs_x, crs_y, region, message))
+            cv2.moveWindow(map_window, *bomi_teleop.MAP_WINDOW_POS)  # a just-closed window can make the WM reclaim the position otherwise
             cv2.setWindowProperty(map_window, cv2.WND_PROP_TOPMOST, 1)  # re-pin (same-process windows only)
             safety.raise_window(map_window)  # actually wins over the cross-process fullscreen camera_viewer window
 
@@ -581,7 +582,7 @@ def main() -> None:
             samples = bomi_teleop.calibration_phase(cap, landmarker)
             bomi_map.fit(samples)
             print("PCA map fitted")
-        bring_window_to_front(bomi_teleop.MAP_WINDOW_NAME, MAP_WINDOW_POS)
+        bring_window_to_front(bomi_teleop.MAP_WINDOW_NAME, bomi_teleop.MAP_WINDOW_POS)
         start_camera_viewer(cli_args.robot_ip)
         reachy.head.rotate_by(pitch=-STARTUP_GAZE_PITCH_DEG, yaw=0, roll=0, wait=False)  # look down
 
